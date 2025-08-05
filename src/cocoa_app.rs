@@ -10,4 +10,5 @@ pub fn run() {
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         app.run();
     });
+
 }
