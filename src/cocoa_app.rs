@@ -1,12 +1,14 @@
-use cocoa::appkit::{NSApp, NSApplication, NSApplicationActivationPolicy};
-use cocoa::base::nil;
-use cocoa::foundation::NSAutoreleasePool;
+use objc2::rc::autoreleasepool;
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApp, NSApplicationActivationPolicy};
 
+#[allow(dead_code)]
 pub fn run() {
-    unsafe {
-        let _pool = NSAutoreleasePool::new(nil);
-        let app = NSApp();
-        app.setActivationPolicy_(NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
+    autoreleasepool(|_| {
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let app = NSApp(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         app.run();
-    }
+    });
+
 }
