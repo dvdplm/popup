@@ -1,23 +1,18 @@
-//! Implementing `NSApplicationDelegate` for a custom class.
-#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
+mod hotkey;
+mod utils;
+
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
-use objc2_foundation::{
-    NSCopying, NSNotification, NSObject, NSObjectProtocol, NSString, ns_string,
-};
+use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-#[derive(Debug)]
-#[allow(unused)]
-struct Ivars {
-    ivar: u8,
-    another_ivar: bool,
-    box_ivar: Box<i32>,
-    maybe_box_ivar: Option<Box<i32>>,
-    id_ivar: Retained<NSString>,
-    maybe_retained_ivar: Option<Retained<NSString>>,
-}
+use utils::*;
+
+// Global reference to NSApplication for signal handler
+static APP_INSTANCE: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mut());
 
 define_class!(
     // SAFETY:
@@ -25,7 +20,6 @@ define_class!(
     // - `AppDelegate` does not implement `Drop`.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[ivars = Ivars]
     struct AppDelegate;
 
     unsafe impl NSObjectProtocol for AppDelegate {}
@@ -33,34 +27,28 @@ define_class!(
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, notification: &NSNotification) {
-            println!("Did finish launching!");
-            println!("Process ID: {}", std::process::id());
+            ll("🪧 Did finish launching!");
+            ll(&format!("🪧 Process ID: {}", std::process::id()));
             // Do something with the notification
             dbg!(notification);
-            // Access instance variables
-            dbg!(self.ivars());
 
-            NSApplication::main(MainThreadMarker::from(self));
+            // Register the global hotkey (Cmd+Shift+M)
+            unsafe {
+                hotkey::register_hotkey();
+            }
         }
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
-            println!("Will terminate!");
+            ll("🪧 Will terminate!");
         }
     }
 );
 
 impl AppDelegate {
-    fn new(ivar: u8, another_ivar: bool, mtm: MainThreadMarker) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm);
-        let this = this.set_ivars(Ivars {
-            ivar,
-            another_ivar,
-            box_ivar: Box::new(2),
-            maybe_box_ivar: None,
-            id_ivar: NSString::from_str("abc"),
-            maybe_retained_ivar: Some(ns_string!("def").copy()),
-        });
+        let this = this.set_ivars(());
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -71,8 +59,19 @@ fn main() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
+    // Store app reference for signal handler
+    APP_INSTANCE.store(
+        Retained::as_ptr(&app) as *mut NSApplication,
+        Ordering::SeqCst,
+    );
+
+    // Set up signal handler for graceful Ctrl+C handling
+    unsafe {
+        utils::setup_signal_handler();
+    }
+
     // configure the application delegate
-    let delegate = AppDelegate::new(42, true, mtm);
+    let delegate = AppDelegate::new(mtm);
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
 

@@ -45,7 +45,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "popup"
+name = "popuppp"
 version = "0.1.0"
 dependencies = [
  "objc2",
