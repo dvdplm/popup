@@ -1,5 +1,5 @@
 //! Implementing `NSApplicationDelegate` for a custom class.
-#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(unsafe_op_in_unsafe_fn)]
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -17,11 +17,8 @@ unsafe extern "C" {
 fn ll(msg: &str) {
     println!("{}", msg);
     let ns_msg: Retained<AnyObject> = NSString::from_str(msg).into();
-    // let ns_msg = NSString::from_str(msg);
     unsafe {
         NSLog(Retained::as_ptr(&ns_msg));
-        // NSLog(ns_msg.as_ptr());
-        // NSLog(ns_msg.as_ptr());
     }
 }
 
@@ -36,102 +33,137 @@ struct Ivars {
     maybe_retained_ivar: Option<Retained<NSString>>,
 }
 
-// --- Carbon FFI for global hotkey registration ---
+// --- CoreGraphics FFI for global hotkey registration ---
 
-#[link(name = "Carbon", kind = "framework")]
+#[link(name = "CoreGraphics", kind = "framework")]
+#[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn RegisterEventHotKey(
-        inHotKeyCode: c_uint,
-        inHotKeyModifiers: c_uint,
-        inHotKeyID: EventHotKeyID,
-        inEventTarget: *mut c_void,
-        inOptions: c_uint,
-        outRef: *mut *mut c_void,
-    ) -> c_int;
+    fn CGEventTapCreate(
+        tap: c_uint,
+        place: c_uint,
+        options: c_uint,
+        events_of_interest: u64,
+        callback: CGEventTapCallBack,
+        refcon: *mut c_void,
+    ) -> *mut c_void;
 
-    fn InstallEventHandler(
-        inEventTarget: *mut c_void,
-        inHandler: EventHandlerUPP,
-        inNumTypes: c_uint,
-        inList: *const EventTypeSpec,
-        inUserData: *mut c_void,
-        outRef: *mut *mut c_void,
-    ) -> c_int;
-    unsafe fn GetApplicationEventTarget() -> *mut c_void;
+    fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+
+    fn CFRunLoopGetCurrent() -> *mut c_void;
+    fn CFRunLoopAddSource(rl: *mut c_void, source: *mut c_void, mode: *mut c_void);
+    fn CFMachPortCreateRunLoopSource(
+        allocator: *mut c_void,
+        port: *mut c_void,
+        order: c_int,
+    ) -> *mut c_void;
+
+    fn CGEventGetType(event: *mut c_void) -> c_uint;
+    fn CGEventGetFlags(event: *mut c_void) -> u64;
+    fn CGEventGetIntegerValueField(event: *mut c_void, field: c_uint) -> i64;
+
+    static kCFRunLoopCommonModes: *mut c_void;
 }
 
-type EventHandlerUPP = extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> c_int;
+type CGEventTapCallBack = extern "C" fn(
+    proxy: *mut c_void,
+    event_type: c_uint,
+    event: *mut c_void,
+    refcon: *mut c_void,
+) -> *mut c_void;
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct EventHotKeyID {
-    signature: c_uint,
-    id: c_uint,
-}
+// Constants for CGEventTap
+const K_CG_SESSION_EVENT_TAP: c_uint = 0;
+const K_CG_HEAD_INSERT_EVENT_TAP: c_uint = 0;
+const K_CG_EVENT_TAP_OPTION_DEFAULT: c_uint = 0;
+const K_CG_EVENT_KEY_DOWN: c_uint = 10;
+const K_CG_EVENT_FLAGS_CHANGED: c_uint = 12;
+const K_CG_KEYCODE_FIELD: c_uint = 9;
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-#[allow(non_snake_case)]
-struct EventTypeSpec {
-    eventClass: c_uint,
-    eventKind: c_uint,
-}
+// Modifier flags
+const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x100000;
+const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x20000;
 
-// Constants for Carbon
-const EVENT_CLASS_KEYBOARD: c_uint = 0x6B64776E; // 'kdwn'
-const EVENT_HOT_KEY_PRESSED: c_uint = 6;
-const CMD_KEY: c_uint = 1 << 8;
-const SHIFT_KEY: c_uint = 1 << 9;
+static mut EVENT_TAP: *mut c_void = std::ptr::null_mut();
 
 // This is the callback for the hotkey event
-extern "C" fn hotkey_handler(
-    _next_handler: *mut c_void,
-    _the_event: *mut c_void,
-    _user_data: *mut c_void,
-) -> c_int {
-    ll("You called me master!");
-    0
+extern "C" fn event_tap_callback(
+    _proxy: *mut c_void,
+    event_type: c_uint,
+    event: *mut c_void,
+    _refcon: *mut c_void,
+) -> *mut c_void {
+    unsafe {
+        if event_type == K_CG_EVENT_KEY_DOWN {
+            let keycode = CGEventGetIntegerValueField(event, K_CG_KEYCODE_FIELD);
+            let flags = CGEventGetFlags(event);
+
+            // Check for Cmd+Shift+K (keycode 40)
+            if keycode == 40
+                && (flags & K_CG_EVENT_FLAG_MASK_COMMAND) != 0
+                && (flags & K_CG_EVENT_FLAG_MASK_SHIFT) != 0
+            {
+                ll("HOTKEY PRESSED! You called me master!");
+
+                // Return null to consume the event (prevent it from propagating)
+                return std::ptr::null_mut();
+            }
+        }
+    }
+
+    // Return the event unchanged for other keys
+    event
 }
 
 unsafe fn register_hotkey() {
-    let hotkey_id = EventHotKeyID {
-        signature: 0x1234,
-        id: 1,
-    };
-    let event_type = EventTypeSpec {
-        eventClass: EVENT_CLASS_KEYBOARD,
-        eventKind: EVENT_HOT_KEY_PRESSED,
-    };
-    let mut hotkey_ref: *mut c_void = std::ptr::null_mut();
-    let event_target: *mut c_void = unsafe { GetApplicationEventTarget() };
+    ll("Setting up CGEventTap for global hotkey...");
 
-    // Keycode for 'M' is 46 on US keyboards
-    let keycode_m: c_uint = 46;
-    let modifiers = CMD_KEY | SHIFT_KEY;
+    // Create event mask for key down events
+    let event_mask = 1u64 << K_CG_EVENT_KEY_DOWN;
 
-    let reg_result = unsafe {
-        RegisterEventHotKey(
-            keycode_m,
-            modifiers,
-            hotkey_id,
-            event_target,
-            0,
-            &mut hotkey_ref,
-        )
-    };
-    ll(&format!("RegisterEventHotKey result: {}", reg_result));
-
-    let install_result = unsafe {
-        InstallEventHandler(
-            event_target,
-            hotkey_handler,
-            1,
-            &event_type,
-            std::ptr::null_mut(),
+    let event_tap = unsafe {
+        CGEventTapCreate(
+            K_CG_SESSION_EVENT_TAP,
+            K_CG_HEAD_INSERT_EVENT_TAP,
+            K_CG_EVENT_TAP_OPTION_DEFAULT,
+            event_mask,
+            event_tap_callback,
             std::ptr::null_mut(),
         )
     };
-    ll(&format!("InstallEventHandler result: {}", install_result));
+
+    if event_tap.is_null() {
+        ll("Failed to create event tap! You may need to grant Accessibility permissions:");
+        ll("System Settings > Privacy & Security > Accessibility");
+        ll("Add your terminal app or the popup binary to the list.");
+        return;
+    }
+
+    EVENT_TAP = event_tap;
+    ll("✅ Event tap created successfully!");
+
+    // Create a run loop source for the event tap
+    let run_loop_source =
+        unsafe { CFMachPortCreateRunLoopSource(std::ptr::null_mut(), event_tap, 0) };
+
+    if run_loop_source.is_null() {
+        ll("❌ Failed to create run loop source!");
+        return;
+    }
+
+    // Add the source to the current run loop
+    let current_run_loop = unsafe { CFRunLoopGetCurrent() };
+    unsafe {
+        CFRunLoopAddSource(current_run_loop, run_loop_source, kCFRunLoopCommonModes);
+    }
+
+    // Enable the event tap
+    unsafe {
+        CGEventTapEnable(event_tap, true);
+    }
+
+    ll("🎯 Global hotkey registered successfully!");
+    ll("Press Cmd+Shift+K to trigger the hotkey");
+    ll("Note: You may need Accessibility permissions for this to work");
 }
 
 define_class!(
@@ -160,7 +192,7 @@ define_class!(
                 register_hotkey();
             }
 
-            NSApplication::main(MainThreadMarker::from(self));
+            // Removed NSApplication::main call - already in main loop
         }
 
         #[unsafe(method(applicationWillTerminate:))]
