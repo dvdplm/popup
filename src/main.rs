@@ -9,10 +9,15 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationD
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+use eframe::egui;
+
 use utils::*;
 
 // Global reference to NSApplication for signal handler
 static APP_INSTANCE: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mut());
+
+// Global reference to AppDelegate for hotkey dispatching
+pub(crate) static APP_DELEGATE: AtomicPtr<AppDelegate> = AtomicPtr::new(std::ptr::null_mut());
 
 define_class!(
     // SAFETY:
@@ -42,6 +47,12 @@ define_class!(
         fn will_terminate(&self, _notification: &NSNotification) {
             ll("🪧 Will terminate!");
         }
+
+        #[unsafe(method(showEguiWindow))]
+        fn show_egui_window(&self) {
+            ll("🎯 Main thread here! Ready to show egui window");
+            // TODO: Initialize and show eframe/egui window here
+        }
     }
 );
 
@@ -53,7 +64,7 @@ impl AppDelegate {
     }
 }
 
-fn main() {
+fn main() -> eframe::Result {
     let mtm: MainThreadMarker = MainThreadMarker::new().unwrap();
 
     let app = NSApplication::sharedApplication(mtm);
@@ -75,6 +86,13 @@ fn main() {
     let object = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(object));
 
+    // Store delegate reference for hotkey dispatching
+    APP_DELEGATE.store(
+        Retained::as_ptr(&delegate) as *mut AppDelegate,
+        Ordering::SeqCst,
+    );
+
     // run the app
     app.run();
+    Ok(())
 }

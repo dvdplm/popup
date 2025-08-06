@@ -67,7 +67,17 @@ extern "C" fn event_tap_callback(
                 && (flags & K_CG_EVENT_FLAG_MASK_COMMAND) != 0
                 && (flags & K_CG_EVENT_FLAG_MASK_SHIFT) != 0
             {
-                ll("✅ HOTKEY PRESSED! You called me master!");
+                ll("✅ HOTKEY PRESSED! Dispatching to main thread...");
+
+                // Dispatch to main thread
+                let delegate_ptr = crate::APP_DELEGATE.load(std::sync::atomic::Ordering::SeqCst);
+                if !delegate_ptr.is_null() {
+                    let delegate = &*delegate_ptr;
+                    let selector = objc2::sel!(showEguiWindow);
+                    let _: () = objc2::msg_send![delegate, performSelectorOnMainThread: selector, withObject: std::ptr::null::<objc2_foundation::NSObject>(), waitUntilDone:false];
+                } else {
+                    ll("❌ No delegate available for dispatch");
+                }
 
                 // Return null to consume the event (prevent it from propagating)
                 return std::ptr::null_mut();
