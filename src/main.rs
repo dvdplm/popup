@@ -7,7 +7,9 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationD
 use objc2_foundation::{
     NSCopying, NSNotification, NSObject, NSObjectProtocol, NSString, ns_string,
 };
-use std::os::raw::{c_int, c_uint, c_void};
+use std::ffi::c_int;
+use std::os::raw::{c_uint, c_void};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 #[link(name = "Foundation", kind = "framework")]
 unsafe extern "C" {
@@ -15,7 +17,6 @@ unsafe extern "C" {
 }
 
 fn ll(msg: &str) {
-    println!("{}", msg);
     let ns_msg: Retained<AnyObject> = NSString::from_str(msg).into();
     unsafe {
         NSLog(Retained::as_ptr(&ns_msg));
@@ -57,7 +58,6 @@ unsafe extern "C" {
         order: c_int,
     ) -> *mut c_void;
 
-    fn CGEventGetType(event: *mut c_void) -> c_uint;
     fn CGEventGetFlags(event: *mut c_void) -> u64;
     fn CGEventGetIntegerValueField(event: *mut c_void, field: c_uint) -> i64;
 
@@ -76,7 +76,6 @@ const K_CG_SESSION_EVENT_TAP: c_uint = 0;
 const K_CG_HEAD_INSERT_EVENT_TAP: c_uint = 0;
 const K_CG_EVENT_TAP_OPTION_DEFAULT: c_uint = 0;
 const K_CG_EVENT_KEY_DOWN: c_uint = 10;
-const K_CG_EVENT_FLAGS_CHANGED: c_uint = 12;
 const K_CG_KEYCODE_FIELD: c_uint = 9;
 
 // Modifier flags
@@ -84,6 +83,9 @@ const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x100000;
 const K_CG_EVENT_FLAG_MASK_SHIFT: u64 = 0x20000;
 
 static mut EVENT_TAP: *mut c_void = std::ptr::null_mut();
+
+// Global reference to NSApplication for signal handler
+static APP_INSTANCE: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mut());
 
 // This is the callback for the hotkey event
 extern "C" fn event_tap_callback(
@@ -102,7 +104,7 @@ extern "C" fn event_tap_callback(
                 && (flags & K_CG_EVENT_FLAG_MASK_COMMAND) != 0
                 && (flags & K_CG_EVENT_FLAG_MASK_SHIFT) != 0
             {
-                ll("HOTKEY PRESSED! You called me master!");
+                ll("✅ HOTKEY PRESSED! You called me master!");
 
                 // Return null to consume the event (prevent it from propagating)
                 return std::ptr::null_mut();
@@ -115,7 +117,7 @@ extern "C" fn event_tap_callback(
 }
 
 unsafe fn register_hotkey() {
-    ll("Setting up CGEventTap for global hotkey...");
+    ll("🪧 Setting up CGEventTap for global hotkey...");
 
     // Create event mask for key down events
     let event_mask = 1u64 << K_CG_EVENT_KEY_DOWN;
@@ -132,9 +134,9 @@ unsafe fn register_hotkey() {
     };
 
     if event_tap.is_null() {
-        ll("Failed to create event tap! You may need to grant Accessibility permissions:");
-        ll("System Settings > Privacy & Security > Accessibility");
-        ll("Add your terminal app or the popup binary to the list.");
+        ll("🪧 Failed to create event tap! You may need to grant Accessibility permissions:");
+        ll("\tSystem Settings > Privacy & Security > Accessibility");
+        ll("\tAdd your terminal app or the popup binary to the list.");
         return;
     }
 
@@ -162,8 +164,7 @@ unsafe fn register_hotkey() {
     }
 
     ll("🎯 Global hotkey registered successfully!");
-    ll("Press Cmd+Shift+K to trigger the hotkey");
-    ll("Note: You may need Accessibility permissions for this to work");
+    ll("🪧 Press Cmd+Shift+K to trigger the hotkey");
 }
 
 define_class!(
@@ -180,8 +181,8 @@ define_class!(
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, notification: &NSNotification) {
-            ll("Did finish launching!");
-            ll(&format!("Process ID: {}", std::process::id()));
+            ll("🪧 Did finish launching!");
+            ll(&format!("🪧 Process ID: {}", std::process::id()));
             // Do something with the notification
             dbg!(notification);
             // Access instance variables
@@ -197,7 +198,7 @@ define_class!(
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
-            ll("Will terminate!");
+            ll("🪧 Will terminate!");
         }
     }
 );
@@ -217,11 +218,53 @@ impl AppDelegate {
     }
 }
 
+// Signal handler for SIGINT (Ctrl+C)
+extern "C" fn sigint_handler(_signal: c_int) {
+    ll("🪧 Received SIGINT (Ctrl+C) - initiating proper app termination...");
+
+    let app_ptr = APP_INSTANCE.load(Ordering::SeqCst);
+    if !app_ptr.is_null() {
+        unsafe {
+            let app = &*app_ptr;
+            // Use performSelectorOnMainThread to ensure thread safety
+            let selector = objc2::sel!(terminate:);
+            let _: () = objc2::msg_send![app, performSelectorOnMainThread: selector, withObject:std::ptr::null::<NSObject>(), waitUntilDone:false];
+            ll("✅ Cocoa exit.");
+        }
+    } else {
+        ll("☑ No app instance available, exiting directly");
+        std::process::exit(0);
+    }
+}
+
+unsafe fn setup_signal_handler() {
+    unsafe extern "C" {
+        fn signal(sig: c_int, handler: extern "C" fn(c_int)) -> extern "C" fn(c_int);
+    }
+
+    const SIGINT: c_int = 2;
+    unsafe {
+        signal(SIGINT, sigint_handler);
+    }
+    ll("✅ Set up SIGINT handler for graceful Ctrl+C handling");
+}
+
 fn main() {
     let mtm: MainThreadMarker = MainThreadMarker::new().unwrap();
 
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+
+    // Store app reference for signal handler
+    APP_INSTANCE.store(
+        Retained::as_ptr(&app) as *mut NSApplication,
+        Ordering::SeqCst,
+    );
+
+    // Set up signal handler for graceful Ctrl+C handling
+    unsafe {
+        setup_signal_handler();
+    }
 
     // configure the application delegate
     let delegate = AppDelegate::new(42, true, mtm);
