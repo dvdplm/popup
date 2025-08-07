@@ -406,18 +406,10 @@ define_class!(
         /// Handle key down events
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: *mut objc2::runtime::AnyObject) {
+            let mut handled = false;
             if let Some(state) = self.ivars().state.get() {
                 let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
                 let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
-
-                // Handle ESC key directly to hide window
-                if keycode == 53 {
-                    ll("🚨 ESC key pressed - hiding window");
-                    if let Some(window) = self.window() {
-                        window.orderOut(None);
-                    }
-                    return;
-                }
 
                 let modifiers = state.ns_modifiers_to_egui(modifier_flags);
                 *state.modifiers.borrow_mut() = modifiers;
@@ -430,6 +422,7 @@ define_class!(
                         repeat: false,
                         modifiers,
                     });
+                    handled = true;
                 }
 
                 // Handle text input
@@ -444,6 +437,7 @@ define_class!(
                                     continue;
                                 }
                                 state.events.borrow_mut().push(egui::Event::Text(unicode_char.to_string()));
+                                handled = true;
                             }
                         }
                     }
@@ -451,11 +445,15 @@ define_class!(
 
                 unsafe { self.setNeedsDisplay(true) };
             }
+            if !handled {
+                unsafe { objc2::msg_send![super(self), keyDown: event] }
+            }
         }
 
         /// Handle key up events
         #[unsafe(method(keyUp:))]
         fn key_up(&self, event: *mut objc2::runtime::AnyObject) {
+            let mut handled = false;
             if let Some(state) = self.ivars().state.get() {
                 let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
                 let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
@@ -471,9 +469,13 @@ define_class!(
                         repeat: false,
                         modifiers,
                     });
+                    handled = true;
                 }
 
                 unsafe { self.setNeedsDisplay(true) };
+            }
+            if !handled {
+                unsafe { objc2::msg_send![super(self), keyUp: event] }
             }
         }
 

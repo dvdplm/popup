@@ -134,11 +134,12 @@ define_class!(
             ll("🔍 Activating application with force...");
             let app = NSApplication::sharedApplication(mtm);
             // Use the old method that forces activation even when another app is active
+            #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
 
             // Create a borderless window for popup-style UI
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
-            let style_mask = NSWindowStyleMask::Borderless;
+            let style_mask = NSWindowStyleMask::Titled;
             let backing_store_type = NSBackingStoreType::Buffered;
 
             // Use the alloc/init pattern for creating a window with parameters.
