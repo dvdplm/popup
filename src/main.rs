@@ -4,12 +4,10 @@ mod hotkey;
 mod trrpy;
 mod utils;
 
-fn restore_previous_app_focus(window: &CustomWindow) {
+fn restore_previous_app_focus(window: &NSWindow) {
     if let Some(content_view) = window.contentView() {
-        let egui_view: &crate::egui_view::EguiView = unsafe {
-            &*((&*content_view) as *const objc2_app_kit::NSView
-                as *const crate::egui_view::EguiView)
-        };
+        let egui_view: &EguiView =
+            unsafe { &*((&*content_view) as *const NSView as *const EguiView) };
         if let Some(state) = egui_view.ivars().state.get() {
             if let Some(pid) = state.app.borrow().prev_app_pid {
                 let running_app_class = objc2::runtime::AnyClass::get(
@@ -160,38 +158,23 @@ define_class!(
 
             // Check if we already have a window
             if let Some(ref window) = self.ivars().window {
-                // Always store the previous frontmost app PID before showing/toggling
-                unsafe {
-                    let workspace = NSWorkspace::sharedWorkspace();
-                    let active_app = workspace.frontmostApplication();
-                    if let Some(app_obj) = active_app {
-                        let pid: i32 = objc2::msg_send![&*app_obj, processIdentifier];
-                        if let Some(content_view) = (&*window).contentView() {
-                            let egui_view: &EguiView =
-                                &*((&*content_view) as *const NSView as *const EguiView);
-                            if let Some(state) = egui_view.ivars().state.get() {
-                                state.app.borrow_mut().prev_app_pid = Some(pid as u32);
-                                ll(&format!("🔙 Stored previous app PID in TrrpyApp: {}", pid));
-                            }
-                        }
-                    }
-                }
                 if (&*window).isVisible() {
                     ll("🙈 Window is visible, hiding it...");
                     (&*window).orderOut(None);
                     restore_previous_app_focus(&*window);
                     return;
                 } else {
-                    // Always store the previous frontmost app PID before showing/toggling
+                    // Only store the previous frontmost app PID when showing (not hiding)
                     unsafe {
                         let workspace = NSWorkspace::sharedWorkspace();
                         let active_app = workspace.frontmostApplication();
                         if let Some(app_obj) = active_app {
                             let pid: i32 = objc2::msg_send![&*app_obj, processIdentifier];
                             if let Some(content_view) = (&*window).contentView() {
-                                let egui_view: &EguiView = &*((&*content_view)
-                                    as *const objc2_app_kit::NSView
-                                    as *const EguiView);
+                                let egui_view: &crate::egui_view::EguiView = unsafe {
+                                    &*((&*content_view) as *const objc2_app_kit::NSView
+                                        as *const crate::egui_view::EguiView)
+                                };
                                 if let Some(state) = egui_view.ivars().state.get() {
                                     state.app.borrow_mut().prev_app_pid = Some(pid as u32);
                                     ll(&format!("🔙 Stored previous app PID in TrrpyApp: {}", pid));

@@ -229,6 +229,7 @@ define_class!(
                 if state.app.borrow().esc_pressed {
                     if let Some(window) = self.window() {
                         window.orderOut(None);
+                        crate::restore_previous_app_focus(&*window);
                     }
                     // Restore focus to previous app if PID is available (from TrrpyApp)
                     let prev_app_pid = state.app.borrow().prev_app_pid; // TODO: should probably `take()` here so we clear the pid.
@@ -259,6 +260,7 @@ define_class!(
                                 // Hide the window instead of terminating
                                 if let Some(window) = self.window() {
                                     window.orderOut(None);
+                                    crate::restore_previous_app_focus(&*window);
                                 }
                                 return;
                             }
