@@ -92,6 +92,7 @@ define_class!(
 
             // IMPORTANT: Initialize the egui/wgpu state *after* the view is in the window.
             view.init_state();
+            window.makeFirstResponder(Some(&view));
 
             // Show the window
             window.makeKeyAndOrderFront(None);

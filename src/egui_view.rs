@@ -1,6 +1,7 @@
 use crate::trrpy::TrrpyApp;
 use crate::utils::ll;
-use egui::{self, Context};
+use egui::ViewportInfo;
+use egui::{self, Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Vec2};
 use egui_wgpu::Renderer;
 use egui_wgpu::wgpu::{
     self, SurfaceTargetUnsafe,
@@ -12,10 +13,12 @@ use egui_wgpu::wgpu::{
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::NSView;
-use objc2_foundation::NSRect;
+use objc2_foundation::{NSPoint, NSRect};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::OnceLock;
+use std::time::{Instant, SystemTime};
 
 /// This struct will hold the state for our custom egui view.
 /// It's stored in an Ivar in the `EguiView` Objective-C object.
@@ -33,6 +36,11 @@ struct EguiViewState {
     queue: wgpu::Queue,
     /// The configuration for the wgpu surface.
     surface_config: wgpu::SurfaceConfiguration,
+    /// Event handling
+    events: RefCell<Vec<Event>>,
+    last_frame_time: RefCell<Instant>,
+    mouse_pos: RefCell<Pos2>,
+    modifiers: RefCell<Modifiers>,
 }
 
 impl Debug for EguiViewState {
@@ -44,7 +52,85 @@ impl Debug for EguiViewState {
             .field("device", &self.device)
             .field("queue", &self.queue)
             .field("surface_config", &self.surface_config)
+            .field("events", &self.events)
+            .field("mouse_pos", &self.mouse_pos)
+            .field("modifiers", &self.modifiers)
             .finish()
+    }
+}
+
+impl EguiViewState {
+    /// Convert NSPoint to egui coordinates (flip Y axis and account for view bounds)
+    fn ns_point_to_egui_pos(&self, ns_point: NSPoint, view_height: f64) -> Pos2 {
+        Pos2::new(ns_point.x as f32, (view_height - ns_point.y) as f32)
+    }
+
+    /// Convert NSEvent keycode to egui Key
+    fn ns_keycode_to_egui_key(&self, keycode: u16) -> Option<Key> {
+        match keycode {
+            // Letters
+            0 => Some(Key::A),
+            1 => Some(Key::S),
+            2 => Some(Key::D),
+            3 => Some(Key::F),
+            4 => Some(Key::H),
+            5 => Some(Key::G),
+            6 => Some(Key::Z),
+            7 => Some(Key::X),
+            8 => Some(Key::C),
+            9 => Some(Key::V),
+            11 => Some(Key::B),
+            12 => Some(Key::Q),
+            13 => Some(Key::W),
+            14 => Some(Key::E),
+            15 => Some(Key::R),
+            17 => Some(Key::T),
+            16 => Some(Key::Y),
+            32 => Some(Key::U),
+            34 => Some(Key::I),
+            31 => Some(Key::O),
+            35 => Some(Key::P),
+            45 => Some(Key::N),
+            46 => Some(Key::M),
+
+            // Numbers
+            18 => Some(Key::Num1),
+            19 => Some(Key::Num2),
+            20 => Some(Key::Num3),
+            21 => Some(Key::Num4),
+            23 => Some(Key::Num5),
+            22 => Some(Key::Num6),
+            26 => Some(Key::Num7),
+            28 => Some(Key::Num8),
+            25 => Some(Key::Num9),
+            29 => Some(Key::Num0),
+
+            // Special keys
+            36 => Some(Key::Enter),
+            48 => Some(Key::Tab),
+            49 => Some(Key::Space),
+            51 => Some(Key::Backspace),
+            53 => Some(Key::Escape),
+
+            // Arrow keys
+            123 => Some(Key::ArrowLeft),
+            124 => Some(Key::ArrowRight),
+            125 => Some(Key::ArrowDown),
+            126 => Some(Key::ArrowUp),
+
+            _ => None,
+        }
+    }
+
+    /// Convert NSEvent modifier flags to egui Modifiers
+    fn ns_modifiers_to_egui(&self, ns_flags: u64) -> Modifiers {
+        Modifiers {
+            alt: (ns_flags & 0x080000) != 0,     // NSEventModifierFlagOption
+            ctrl: (ns_flags & 0x040000) != 0,    // NSEventModifierFlagControl
+            shift: (ns_flags & 0x020000) != 0,   // NSEventModifierFlagShift
+            mac_cmd: (ns_flags & 0x100000) != 0, // NSEventModifierFlagCommand
+            command: (ns_flags & 0x100000) != 0, // Use Cmd as the main command key on macOS
+        }
     }
 }
 
@@ -93,8 +179,45 @@ define_class!(
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
-            // For now, we'll create empty input. Later, we'll populate this from NSEvents.
-            let raw_input = egui::RawInput::default();
+            // Collect accumulated events and prepare input for egui
+            let mut events = state.events.borrow_mut();
+            let now = Instant::now();
+            let last_frame_time = *state.last_frame_time.borrow();
+            let frame_time = now.duration_since(last_frame_time);
+            *state.last_frame_time.borrow_mut() = now;
+
+            let mut viewports = HashMap::default();
+            viewports.insert(egui::ViewportId::ROOT, ViewportInfo {
+                native_pixels_per_point: Some(1.0),
+                monitor_size: Some(Vec2::new(1920.0, 1080.0)),
+                inner_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
+                )),
+                outer_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
+                )),
+                ..Default::default()
+            });
+
+            let raw_input = RawInput {
+                viewport_id: egui::ViewportId::ROOT,
+                viewports,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
+                )),
+                max_texture_side: Some(2048),
+                time: Some(SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()),
+                predicted_dt: frame_time.as_secs_f32(),
+                modifiers: *state.modifiers.borrow(),
+                events: events.drain(..).collect(),
+                hovered_files: Vec::new(),
+                dropped_files: Vec::new(),
+                focused: true,
+                system_theme: None,
+            };
 
             let full_output = state.ctx.run(raw_input, |ctx| {
                 state.app.borrow_mut().update(ctx);
@@ -181,6 +304,181 @@ define_class!(
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
+        }
+
+        /// Handle mouse down events
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: *mut objc2::runtime::AnyObject) {
+            if let Some(state) = self.ivars().state.get() {
+                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
+                let local_point = self.convertPoint_fromView(location, None);
+                let view_height = self.frame().size.height;
+
+                let pos = state.ns_point_to_egui_pos(local_point, view_height);
+                *state.mouse_pos.borrow_mut() = pos;
+
+                state.events.borrow_mut().push(egui::Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: *state.modifiers.borrow(),
+                });
+
+                unsafe { self.setNeedsDisplay(true) };
+            }
+        }
+
+        /// Handle mouse up events
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: *mut objc2::runtime::AnyObject) {
+            if let Some(state) = self.ivars().state.get() {
+                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
+                let local_point = self.convertPoint_fromView(location, None);
+                let view_height = self.frame().size.height;
+
+                let pos = state.ns_point_to_egui_pos(local_point, view_height);
+                *state.mouse_pos.borrow_mut() = pos;
+
+                state.events.borrow_mut().push(egui::Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: *state.modifiers.borrow(),
+                });
+
+                unsafe { self.setNeedsDisplay(true) };
+            }
+        }
+
+        /// Handle mouse moved events
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: *mut objc2::runtime::AnyObject) {
+            if let Some(state) = self.ivars().state.get() {
+                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
+                let local_point = self.convertPoint_fromView(location, None);
+                let view_height = self.frame().size.height;
+
+                let pos = state.ns_point_to_egui_pos(local_point, view_height);
+                *state.mouse_pos.borrow_mut() = pos;
+
+                state.events.borrow_mut().push(egui::Event::PointerMoved(pos));
+
+                unsafe { self.setNeedsDisplay(true) };
+            }
+        }
+
+        /// Handle mouse dragged events
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: *mut objc2::runtime::AnyObject) {
+            if let Some(state) = self.ivars().state.get() {
+                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
+                let local_point = self.convertPoint_fromView(location, None);
+                let view_height = self.frame().size.height;
+
+                let pos = state.ns_point_to_egui_pos(local_point, view_height);
+                *state.mouse_pos.borrow_mut() = pos;
+
+                state.events.borrow_mut().push(egui::Event::PointerMoved(pos));
+
+                unsafe { self.setNeedsDisplay(true) };
+            }
+        }
+
+        /// Handle key down events
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: *mut objc2::runtime::AnyObject) {
+            if let Some(state) = self.ivars().state.get() {
+                let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
+                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
+
+                let modifiers = state.ns_modifiers_to_egui(modifier_flags);
+                *state.modifiers.borrow_mut() = modifiers;
+
+                if let Some(key) = state.ns_keycode_to_egui_key(keycode) {
+                    state.events.borrow_mut().push(egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    });
+                }
+
+                // Handle text input
+                let characters: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![event, characters] };
+                if !characters.is_null() {
+                    let length: usize = unsafe { objc2::msg_send![characters, length] };
+                    if length > 0 {
+                        for i in 0..length {
+                            let ch: u16 = unsafe { objc2::msg_send![characters, characterAtIndex: i] };
+                            if let Some(unicode_char) = char::from_u32(ch as u32) {
+                                if unicode_char.is_control() {
+                                    continue;
+                                }
+                                state.events.borrow_mut().push(egui::Event::Text(unicode_char.to_string()));
+                            }
+                        }
+                    }
+                }
+
+                unsafe { self.setNeedsDisplay(true) };
+            }
+        }
+
+        /// Handle key up events
+        #[unsafe(method(keyUp:))]
+        fn key_up(&self, event: *mut objc2::runtime::AnyObject) {
+            if let Some(state) = self.ivars().state.get() {
+                let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
+                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
+
+                let modifiers = state.ns_modifiers_to_egui(modifier_flags);
+                *state.modifiers.borrow_mut() = modifiers;
+
+                if let Some(key) = state.ns_keycode_to_egui_key(keycode) {
+                    state.events.borrow_mut().push(egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers,
+                    });
+                }
+
+                unsafe { self.setNeedsDisplay(true) };
+            }
+        }
+
+        /// Handle modifier key changes
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: *mut objc2::runtime::AnyObject) {
+            if let Some(state) = self.ivars().state.get() {
+                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
+                let modifiers = state.ns_modifiers_to_egui(modifier_flags);
+                *state.modifiers.borrow_mut() = modifiers;
+
+                unsafe { self.setNeedsDisplay(true) };
+            }
+        }
+
+        /// Handle scroll wheel events
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: *mut objc2::runtime::AnyObject) {
+            if let Some(state) = self.ivars().state.get() {
+                let delta_x: f64 = unsafe { objc2::msg_send![event, scrollingDeltaX] };
+                let delta_y: f64 = unsafe { objc2::msg_send![event, scrollingDeltaY] };
+
+                // Convert to egui's scroll delta (positive means scroll up/right)
+                let delta = Vec2::new(delta_x as f32, delta_y as f32);
+
+                state.events.borrow_mut().push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta,
+                    modifiers: *state.modifiers.borrow(),
+                });
+
+                unsafe { self.setNeedsDisplay(true) };
+            }
         }
     }
 );
@@ -296,6 +594,10 @@ impl EguiView {
             device,
             queue,
             surface_config,
+            events: RefCell::new(Vec::new()),
+            last_frame_time: RefCell::new(Instant::now()),
+            mouse_pos: RefCell::new(Pos2::ZERO),
+            modifiers: RefCell::new(Modifiers::default()),
         };
 
         if self.ivars().state.set(state).is_err() {
