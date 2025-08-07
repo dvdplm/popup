@@ -239,8 +239,6 @@ impl EguiView {
         };
 
         // 1. Create wgpu instance and surface.
-        // Because we have implemented `HasRawWindowHandle` for `EguiView`,
-        // we can pass `self` directly to `create_surface`.
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let target = unsafe { SurfaceTargetUnsafe::from_window(self).unwrap() };
         let surface = unsafe { instance.create_surface_unsafe(target).unwrap() };
