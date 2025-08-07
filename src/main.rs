@@ -23,9 +23,30 @@ static APP_INSTANCE: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mu
 // Global reference to AppDelegate for hotkey dispatching
 pub(crate) static APP_DELEGATE: AtomicPtr<AppDelegate> = AtomicPtr::new(std::ptr::null_mut());
 
+// Custom NSWindow subclass to allow borderless window to become key/main window
+define_class!(
+    #[unsafe(super(NSWindow))]
+    #[thread_kind = MainThreadOnly]
+    #[derive(Debug)]
+    struct CustomWindow;
+
+    unsafe impl NSObjectProtocol for CustomWindow {}
+
+    impl CustomWindow {
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key_window(&self) -> bool {
+            true
+        }
+        #[unsafe(method(canBecomeMainWindow))]
+        fn can_become_main_window(&self) -> bool {
+            true
+        }
+    }
+);
+
 #[derive(Debug)]
 pub(crate) struct Ivars {
-    window: Option<objc2::rc::Retained<NSWindow>>,
+    window: Option<Retained<CustomWindow>>,
 }
 
 define_class!(
@@ -92,7 +113,7 @@ define_class!(
 
             // Hide the window if it exists
             if let Some(ref window) = self.ivars().window {
-                window.orderOut(None);
+                (&*window).orderOut(None);
             }
 
             objc2_app_kit::NSApplicationTerminateReply::TerminateNow
@@ -115,9 +136,9 @@ define_class!(
 
             // Check if we already have a window
             if let Some(ref window) = self.ivars().window {
-                if window.isVisible() {
+                if (&*window).isVisible() {
                     ll("🙈 Window is visible, hiding it...");
-                    window.orderOut(None);
+                    (&*window).orderOut(None);
                     return;
                 } else {
                     ll("👁️ Window exists but hidden, showing it...");
@@ -139,33 +160,30 @@ define_class!(
 
             // Create a borderless window for popup-style UI
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
-            let style_mask = NSWindowStyleMask::Titled;
+            let style_mask = NSWindowStyleMask::Borderless;
             let backing_store_type = NSBackingStoreType::Buffered;
 
-            // Use the alloc/init pattern for creating a window with parameters.
-            let window = unsafe {
-                let w = NSWindow::alloc(mtm);
-                NSWindow::initWithContentRect_styleMask_backing_defer(
-                    w,
-                    frame,
-                    style_mask,
-                    backing_store_type,
-                    false, // defer
-                )
+            // Allocate and initialize your custom window subclass using Objective-C messaging
+            let window: objc2::rc::Retained<CustomWindow> = unsafe {
+                let w = CustomWindow::alloc(mtm);
+                objc2::msg_send![w, initWithContentRect:frame,
+                    styleMask:style_mask,
+                    backing:backing_store_type,
+                    defer:false]
             };
             // No title for borderless window
-            window.center();
+            (&*window).center();
 
             // Set window level to floating to ensure it appears above other apps
             ll("🔝 Setting window level to floating...");
-            window.setLevel(3); // NSFloatingWindowLevel = 3
+            (&*window).setLevel(3); // NSFloatingWindowLevel = 3
 
             // Enable mouse moved events for borderless window
-            window.setAcceptsMouseMovedEvents(true);
+            (&*window).setAcceptsMouseMovedEvents(true);
 
             // Create and set window delegate to handle close events
             let window_delegate = WindowDelegate::new(mtm);
-            window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
+            (&*window).setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
                 &*window_delegate,
             )));
 
@@ -176,7 +194,7 @@ define_class!(
             let view = EguiView::new(mtm);
 
             // Set the view as the window's content view
-            window.setContentView(Some(&view));
+            (&*window).setContentView(Some(&view));
 
             // IMPORTANT: Initialize the egui/wgpu state *after* the view is in the window.
             view.init_state();
@@ -190,17 +208,17 @@ define_class!(
 
             // Show and focus the window
             ll("🪟 Making window key and ordering front...");
-            window.makeKeyAndOrderFront(None);
+            (&*window).makeKeyAndOrderFront(None);
 
             // Ensure the window is at the front and focused
             ll("🔝 Bringing window to front regardless...");
             unsafe {
-                window.orderFrontRegardless();
+                (&*window).orderFrontRegardless();
             }
 
             // Make the view the first responder so it can receive keyboard events immediately
             ll("⌨️ Setting first responder...");
-            window.makeFirstResponder(Some(&view));
+            (&*window).makeFirstResponder(Some(&view));
 
             // Additional focus methods to ensure we get focus from other apps
             ll("🔄 Performing additional focus operations...");
@@ -264,8 +282,8 @@ define_class!(
             }
 
             // Make first responder
-            if let Some(content_view) = window.contentView() {
-                window.makeFirstResponder(Some(&content_view));
+            if let Some(content_view) = (&*window).contentView() {
+                (&*window).makeFirstResponder(Some(&content_view));
             }
 
             // // Request attention

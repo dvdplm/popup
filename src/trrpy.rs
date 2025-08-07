@@ -7,6 +7,7 @@ pub struct TrrpyApp {
     text_input: String,
     mouse_pos: egui::Pos2,
     last_key: Option<String>,
+    pub esc_pressed: bool,
 }
 
 impl Default for TrrpyApp {
@@ -17,20 +18,30 @@ impl Default for TrrpyApp {
             text_input: "Type something here...".to_owned(),
             mouse_pos: egui::Pos2::ZERO,
             last_key: None,
+            esc_pressed: false,
         }
     }
 }
 
 impl TrrpyApp {
     pub fn update(&mut self, ctx: &egui::Context) {
+        self.esc_pressed = false;
         // Capture mouse position
         if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
             self.mouse_pos = pointer_pos;
         }
 
-        // Capture last pressed key for display
+        // Capture last pressed key for display and detect ESC
         ctx.input(|i| {
             for event in &i.events {
+                if let egui::Event::Key {
+                    key: egui::Key::Escape,
+                    pressed: true,
+                    ..
+                } = event
+                {
+                    self.esc_pressed = true;
+                }
                 if let egui::Event::Key {
                     key, pressed: true, ..
                 } = event

@@ -219,9 +219,19 @@ define_class!(
                 system_theme: None,
             };
 
-            let full_output = state.ctx.run(raw_input, |ctx| {
-                state.app.borrow_mut().update(ctx);
-            });
+            // Run egui and update app state
+                let full_output = state.ctx.run(raw_input, |ctx| {
+                    state.app.borrow_mut().update(ctx);
+                });
+
+                // Hide window if ESC was pressed
+                if state.app.borrow().esc_pressed {
+                    if let Some(window) = self.window() {
+                        window.orderOut(None);
+                    }
+                    state.app.borrow_mut().esc_pressed = false; // Reset flag
+                    return;
+                }
 
             // Handle viewport commands (like window close)
             for (viewport_id, viewport_output) in &full_output.viewport_output {
