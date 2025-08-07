@@ -61,6 +61,13 @@ define_class!(
             // Get the MainThreadMarker since we are on the main thread.
             let mtm = MainThreadMarker::from(self);
 
+            // First, activate the application to bring it to focus
+            ll("🔍 Activating application...");
+            let app = NSApplication::sharedApplication(mtm);
+            unsafe {
+                app.activate();
+            }
+
             // For now, we create a new window every time. A real app would likely
             // want to cache and reuse the window.
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
@@ -92,10 +99,30 @@ define_class!(
 
             // IMPORTANT: Initialize the egui/wgpu state *after* the view is in the window.
             view.init_state();
+
+            // Show and focus the window
+            ll("🪟 Making window key and ordering front...");
+            window.makeKeyAndOrderFront(None);
+
+            // Ensure the window is at the front and focused
+            ll("🔝 Bringing window to front regardless...");
+            unsafe {
+                window.orderFrontRegardless();
+            }
+
+            // Make the view the first responder so it can receive keyboard events immediately
+            ll("⌨️ Setting first responder...");
             window.makeFirstResponder(Some(&view));
 
-            // Show the window
-            window.makeKeyAndOrderFront(None);
+            // Request attention to make the app icon bounce in the dock
+            ll("🔔 Requesting user attention...");
+            app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::CriticalRequest);
+
+            // Center the window on screen for better visibility
+            ll("🎯 Centering window...");
+            window.center();
+
+            ll("✅ Window setup and focusing complete!");
         }
     }
 );
