@@ -1,34 +1,9 @@
 #![allow(unsafe_op_in_unsafe_fn)]
-mod egui_view;
-mod hotkey;
-mod trrpy;
-mod utils;
-
-fn restore_previous_app_focus(window: &NSWindow) {
-    if let Some(content_view) = window.contentView() {
-        let egui_view: &EguiView =
-            unsafe { &*((&*content_view) as *const NSView as *const EguiView) };
-        if let Some(state) = egui_view.ivars().state.get() {
-            if let Some(pid) = state.app.borrow().prev_app_pid {
-                let running_app_class = objc2::runtime::AnyClass::get(
-                    std::ffi::CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap(),
-                )
-                .unwrap();
-                let prev_app: *mut objc2::runtime::AnyObject = unsafe {
-                    objc2::msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
-                };
-                if !prev_app.is_null() {
-                    let _: bool =
-                        unsafe { objc2::msg_send![prev_app, activateWithOptions: 1u64 << 1] };
-                }
-            }
-        }
-    }
-}
 
 use crate::egui_view::EguiView;
+use crate::trrpy::TrrpyApp;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
@@ -39,11 +14,60 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use utils::*;
 
+mod egui_view;
+mod hotkey;
+mod trrpy;
+mod utils;
+
+use std::cell::RefMut;
+use std::ffi::CStr;
+
 // Global reference to NSApplication for signal handler
 static APP_INSTANCE: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mut());
 
 // Global reference to AppDelegate for hotkey dispatching
 pub(crate) static APP_DELEGATE: AtomicPtr<AppDelegate> = AtomicPtr::new(std::ptr::null_mut());
+
+fn get_egui_app_from_window(window: &NSWindow) -> Option<RefMut<'_, TrrpyApp>> {
+    if let Some(content_view) = window.contentView() {
+        let egui_view: &EguiView =
+            unsafe { &*((&*content_view) as *const NSView as *const EguiView) };
+        if let Some(state) = egui_view.ivars().state.get() {
+            return Some(state.app.borrow_mut());
+        }
+    }
+    None
+}
+
+fn store_prev_app_pid(window: &NSWindow) {
+    unsafe {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let active_app = workspace.frontmostApplication();
+        if let Some(app_obj) = active_app {
+            let pid: i32 = objc2::msg_send![&*app_obj, processIdentifier];
+            if let Some(mut app) = get_egui_app_from_window(window) {
+                app.prev_app_pid = Some(pid as u32);
+                ll(&format!("🔙 Stored previous app PID in TrrpyApp: {}", pid));
+            }
+        }
+    }
+}
+
+fn restore_previous_app_focus(window: &NSWindow) {
+    if let Some(app) = get_egui_app_from_window(window) {
+        if let Some(pid) = app.prev_app_pid {
+            let running_app_class =
+                AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap())
+                    .unwrap();
+            let prev_app: *mut AnyObject = unsafe {
+                objc2::msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
+            };
+            if !prev_app.is_null() {
+                let _: bool = unsafe { objc2::msg_send![prev_app, activateWithOptions: 1u64 << 1] };
+            }
+        }
+    }
+}
 
 // Custom NSWindow subclass to allow borderless window to become key/main window
 define_class!(
@@ -164,24 +188,7 @@ define_class!(
                     restore_previous_app_focus(&*window);
                     return;
                 } else {
-                    // Only store the previous frontmost app PID when showing (not hiding)
-                    unsafe {
-                        let workspace = NSWorkspace::sharedWorkspace();
-                        let active_app = workspace.frontmostApplication();
-                        if let Some(app_obj) = active_app {
-                            let pid: i32 = objc2::msg_send![&*app_obj, processIdentifier];
-                            if let Some(content_view) = (&*window).contentView() {
-                                let egui_view: &crate::egui_view::EguiView = unsafe {
-                                    &*((&*content_view) as *const objc2_app_kit::NSView
-                                        as *const crate::egui_view::EguiView)
-                                };
-                                if let Some(state) = egui_view.ivars().state.get() {
-                                    state.app.borrow_mut().prev_app_pid = Some(pid as u32);
-                                    ll(&format!("🔙 Stored previous app PID in TrrpyApp: {}", pid));
-                                }
-                            }
-                        }
-                    }
+                    store_prev_app_pid(&*window);
                     ll("👁️ Window exists but hidden, showing it...");
                     unsafe {
                         let _: () = objc2::msg_send![self, showExistingWindow: &**window];
