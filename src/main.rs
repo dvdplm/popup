@@ -107,7 +107,7 @@ impl AppDelegate {
     }
 }
 
-fn main() -> eframe::Result {
+fn main() {
     let mtm: MainThreadMarker = MainThreadMarker::new().unwrap();
 
     let app = NSApplication::sharedApplication(mtm);
@@ -137,5 +137,4 @@ fn main() -> eframe::Result {
 
     // run the app
     app.run();
-    Ok(())
 }

@@ -16,10 +16,9 @@ objc2-app-kit = { version = "0.3.1", default-features = false, features = [
     "std",
     "NSResponder",
     "NSApplication",
-    "NSRunningApplication","NSGraphics"
+    "NSRunningApplication","NSGraphics", "NSWindow","NSView"
 ] }
-eframe = { version = "0.32.0", features = ["default", "__screenshot", "wgpu"] }
+egui = "0.32.0"
 egui-wgpu = "0.32.0"
-wgpu = "25.0.2"
-raw-window-handle = "0.6.2"
-epaint = "0.32.0"
+wgpu = {version = "25.0.2", features = ["metal"]}
+pollster = "0.4.0"

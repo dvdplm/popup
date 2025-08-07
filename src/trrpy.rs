@@ -1,5 +1,4 @@
-use crate::utils::ll;
-use eframe::egui;
+use egui;
 
 #[derive(Debug)]
 pub struct TrrpyApp {
@@ -16,8 +15,8 @@ impl Default for TrrpyApp {
     }
 }
 
-impl eframe::App for TrrpyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl TrrpyApp {
+    pub fn update(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("🎯 Trrpy App");
             ui.separator();
@@ -39,22 +38,4 @@ impl eframe::App for TrrpyApp {
             }
         });
     }
-}
-
-pub fn create_and_show_trrpy_app() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 300.0])
-            .with_title("Trrpy"),
-        ..Default::default()
-    };
-
-    ll("About to start egui");
-    let out = eframe::run_native(
-        "Trrpy",
-        options,
-        Box::new(|_cc| Ok(Box::new(TrrpyApp::default()))),
-    );
-    ll(&format!("out={:?}", out));
-    out
 }
