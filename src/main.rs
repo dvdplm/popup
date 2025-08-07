@@ -10,7 +10,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSWindow, NSWindowStyleMask,
+    NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -24,6 +24,40 @@ static APP_INSTANCE: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mu
 
 // Global reference to AppDelegate for hotkey dispatching
 pub(crate) static APP_DELEGATE: AtomicPtr<AppDelegate> = AtomicPtr::new(std::ptr::null_mut());
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    struct WindowDelegate;
+
+    unsafe impl NSObjectProtocol for WindowDelegate {}
+
+    unsafe impl NSWindowDelegate for WindowDelegate {
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+            ll("🚪 Window close button clicked - terminating app...");
+            let mtm = MainThreadMarker::new().unwrap();
+            let app = NSApplication::sharedApplication(mtm);
+            unsafe {
+                app.terminate(None);
+            }
+            false // We terminate the app, so don't close the window normally
+        }
+
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _notification: &NSNotification) {
+            ll("🪟 Window will close notification");
+        }
+    }
+);
+
+impl WindowDelegate {
+    fn new(mtm: MainThreadMarker) -> objc2::rc::Retained<Self> {
+        let this = Self::alloc(mtm);
+        let this = this.set_ivars(());
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 define_class!(
     // SAFETY:
@@ -49,9 +83,27 @@ define_class!(
             }
         }
 
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(
+            &self,
+            _sender: &NSApplication,
+        ) -> objc2_app_kit::NSApplicationTerminateReply {
+            ll("🪧 Application should terminate - cleaning up resources...");
+
+            // Give wgpu time to clean up by letting the current frame finish
+            std::thread::sleep(std::time::Duration::from_millis(16));
+
+            objc2_app_kit::NSApplicationTerminateReply::TerminateNow
+        }
+
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
-            ll("🪧 Will terminate!");
+            ll("🪧 Application will terminate - final cleanup...");
+
+            // Allow any pending operations to complete
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            ll("✅ Final cleanup complete - goodbye!");
         }
 
         #[unsafe(method(showEguiWindow))]
@@ -61,12 +113,11 @@ define_class!(
             // Get the MainThreadMarker since we are on the main thread.
             let mtm = MainThreadMarker::from(self);
 
-            // First, activate the application to bring it to focus
-            ll("🔍 Activating application...");
+            // First, activate the application to bring it to focus - use aggressive activation
+            ll("🔍 Activating application with force...");
             let app = NSApplication::sharedApplication(mtm);
-            unsafe {
-                app.activate();
-            }
+            // Use the old method that forces activation even when another app is active
+            app.activateIgnoringOtherApps(true);
 
             // For now, we create a new window every time. A real app would likely
             // want to cache and reuse the window.
@@ -91,6 +142,19 @@ define_class!(
             window.setTitle(&title);
             window.center();
 
+            // Set window level to floating to ensure it appears above other apps
+            ll("🔝 Setting window level to floating...");
+            window.setLevel(3); // NSFloatingWindowLevel = 3
+
+            // Create and set window delegate to handle close events
+            let window_delegate = WindowDelegate::new(mtm);
+            window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
+                &*window_delegate,
+            )));
+
+            // Store the delegate to prevent deallocation
+            std::mem::forget(window_delegate);
+
             // Create our custom egui view
             let view = EguiView::new(mtm);
 
@@ -114,6 +178,19 @@ define_class!(
             ll("⌨️ Setting first responder...");
             window.makeFirstResponder(Some(&view));
 
+            // Additional focus methods to ensure we get focus from other apps
+            ll("🔄 Performing additional focus operations...");
+
+            // Bring all app windows to front
+            unsafe {
+                let _: () = objc2::msg_send![&app, arrangeInFront: std::ptr::null::<objc2_foundation::NSObject>()];
+            }
+
+            // Force focus on our specific window
+            unsafe {
+                window.orderWindow_relativeTo(objc2_app_kit::NSWindowOrderingMode::Above, 0);
+            }
+
             // Request attention to make the app icon bounce in the dock
             ll("🔔 Requesting user attention...");
             app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::CriticalRequest);
@@ -122,7 +199,18 @@ define_class!(
             ll("🎯 Centering window...");
             window.center();
 
-            ll("✅ Window setup and focusing complete!");
+            // Final activation to ensure focus
+            app.activateIgnoringOtherApps(true);
+
+            // Add small delay to allow focus changes to take effect
+            ll("⏱️ Allowing focus changes to process...");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            // Final key window operation to ensure focus
+            ll("🔑 Final key window operation...");
+            window.makeKeyAndOrderFront(None);
+
+            ll("✅ Window setup and aggressive focusing complete!");
         }
     }
 );

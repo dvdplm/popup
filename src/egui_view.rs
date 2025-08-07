@@ -223,6 +223,31 @@ define_class!(
                 state.app.borrow_mut().update(ctx);
             });
 
+            // Handle viewport commands (like window close)
+            for (viewport_id, viewport_output) in &full_output.viewport_output {
+                if *viewport_id == egui::ViewportId::ROOT {
+                    for command in &viewport_output.commands {
+                        match command {
+                            egui::ViewportCommand::Close => {
+                                ll("🚪 Egui requested window close - terminating app...");
+                                // Terminate the app - automatic cleanup will handle resources
+                                if let Some(mtm) = MainThreadMarker::new() {
+                                    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+                                    unsafe {
+                                        app.terminate(None);
+                                    }
+                                } else {
+                                    ll("❌ Could not get MainThreadMarker for termination");
+                                    std::process::exit(0);
+                                }
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
             let clipped_primitives = state
                 .ctx
                 .tessellate(full_output.shapes, full_output.pixels_per_point);
