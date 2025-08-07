@@ -1,15 +1,21 @@
 #![allow(unsafe_op_in_unsafe_fn)]
+mod egui_view;
 mod hotkey;
+mod trrpy;
 mod utils;
 
+use crate::egui_view::EguiView;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
-use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
+    NSWindow, NSWindowStyleMask,
+};
+use objc2_foundation::{
+    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
 use std::sync::atomic::{AtomicPtr, Ordering};
-
-use eframe::egui;
 
 use utils::*;
 
@@ -50,8 +56,45 @@ define_class!(
 
         #[unsafe(method(showEguiWindow))]
         fn show_egui_window(&self) {
-            ll("🎯 Main thread here! Ready to show egui window");
-            // TODO: Initialize and show eframe/egui window here
+            ll("🎯 Main thread here! Creating egui window...");
+
+            // Get the MainThreadMarker since we are on the main thread.
+            let mtm = MainThreadMarker::from(self);
+
+            // For now, we create a new window every time. A real app would likely
+            // want to cache and reuse the window.
+            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+            let style_mask = NSWindowStyleMask::Titled
+                | NSWindowStyleMask::Closable
+                | NSWindowStyleMask::Resizable;
+            let backing_store_type = NSBackingStoreType::Buffered;
+
+            // Use the alloc/init pattern for creating a window with parameters.
+            let window = unsafe {
+                let w = NSWindow::alloc(mtm);
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    w,
+                    frame,
+                    style_mask,
+                    backing_store_type,
+                    false, // defer
+                )
+            };
+            let title = NSString::from_str("Trrpy");
+            window.setTitle(&title);
+            window.center();
+
+            // Create our custom egui view
+            let view = EguiView::new(mtm);
+
+            // Set the view as the window's content view
+            window.setContentView(Some(&view));
+
+            // IMPORTANT: Initialize the egui/wgpu state *after* the view is in the window.
+            view.init_state();
+
+            // Show the window
+            window.makeKeyAndOrderFront(None);
         }
     }
 );
