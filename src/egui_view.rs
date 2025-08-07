@@ -229,16 +229,10 @@ define_class!(
                     for command in &viewport_output.commands {
                         match command {
                             egui::ViewportCommand::Close => {
-                                ll("🚪 Egui requested window close - terminating app...");
-                                // Terminate the app - automatic cleanup will handle resources
-                                if let Some(mtm) = MainThreadMarker::new() {
-                                    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-                                    unsafe {
-                                        app.terminate(None);
-                                    }
-                                } else {
-                                    ll("❌ Could not get MainThreadMarker for termination");
-                                    std::process::exit(0);
+                                ll("🚪 Egui requested window close - hiding window...");
+                                // Hide the window instead of terminating
+                                if let Some(window) = self.window() {
+                                    window.orderOut(None);
                                 }
                                 return;
                             }
@@ -415,6 +409,15 @@ define_class!(
             if let Some(state) = self.ivars().state.get() {
                 let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
                 let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
+
+                // Handle ESC key directly to hide window
+                if keycode == 53 {
+                    ll("🚨 ESC key pressed - hiding window");
+                    if let Some(window) = self.window() {
+                        window.orderOut(None);
+                    }
+                    return;
+                }
 
                 let modifiers = state.ns_modifiers_to_egui(modifier_flags);
                 *state.modifiers.borrow_mut() = modifiers;

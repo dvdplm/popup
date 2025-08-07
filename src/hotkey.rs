@@ -67,7 +67,7 @@ extern "C" fn event_tap_callback(
                 && (flags & K_CG_EVENT_FLAG_MASK_COMMAND) != 0
                 && (flags & K_CG_EVENT_FLAG_MASK_SHIFT) != 0
             {
-                ll("✅ HOTKEY PRESSED! Dispatching to main thread...");
+                ll("🎯 HOTKEY PRESSED! Toggling window visibility...");
 
                 // Dispatch to main thread
                 let delegate_ptr = crate::APP_DELEGATE.load(std::sync::atomic::Ordering::SeqCst);
@@ -137,5 +137,5 @@ pub(crate) unsafe fn register_hotkey() {
     }
 
     ll("🎯 Global hotkey registered successfully!");
-    ll("🪧 Press Cmd+Shift+K to trigger the hotkey");
+    ll("🪧 Press Cmd+Shift+K to toggle the popup window");
 }

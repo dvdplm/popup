@@ -7,14 +7,12 @@ mod utils;
 use crate::egui_view::EguiView;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
     NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
-use objc2_foundation::{
-    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
-};
+use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use utils::*;
@@ -25,6 +23,11 @@ static APP_INSTANCE: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mu
 // Global reference to AppDelegate for hotkey dispatching
 pub(crate) static APP_DELEGATE: AtomicPtr<AppDelegate> = AtomicPtr::new(std::ptr::null_mut());
 
+#[derive(Debug)]
+pub(crate) struct Ivars {
+    window: Option<objc2::rc::Retained<NSWindow>>,
+}
+
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -34,14 +37,10 @@ define_class!(
 
     unsafe impl NSWindowDelegate for WindowDelegate {
         #[unsafe(method(windowShouldClose:))]
-        fn window_should_close(&self, _sender: &NSWindow) -> bool {
-            ll("🚪 Window close button clicked - terminating app...");
-            let mtm = MainThreadMarker::new().unwrap();
-            let app = NSApplication::sharedApplication(mtm);
-            unsafe {
-                app.terminate(None);
-            }
-            false // We terminate the app, so don't close the window normally
+        fn window_should_close(&self, sender: &NSWindow) -> bool {
+            ll("🚪 Window close requested - hiding window...");
+            sender.orderOut(None);
+            false // Don't actually close the window, just hide it
         }
 
         #[unsafe(method(windowWillClose:))]
@@ -65,6 +64,7 @@ define_class!(
     // - `AppDelegate` does not implement `Drop`.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
+    #[ivars = Ivars]
     struct AppDelegate;
 
     unsafe impl NSObjectProtocol for AppDelegate {}
@@ -88,10 +88,12 @@ define_class!(
             &self,
             _sender: &NSApplication,
         ) -> objc2_app_kit::NSApplicationTerminateReply {
-            ll("🪧 Application should terminate - cleaning up resources...");
+            ll("🪧 Application should terminate - hiding window and allowing exit...");
 
-            // Give wgpu time to clean up by letting the current frame finish
-            std::thread::sleep(std::time::Duration::from_millis(16));
+            // Hide the window if it exists
+            if let Some(ref window) = self.ivars().window {
+                window.orderOut(None);
+            }
 
             objc2_app_kit::NSApplicationTerminateReply::TerminateNow
         }
@@ -108,10 +110,25 @@ define_class!(
 
         #[unsafe(method(showEguiWindow))]
         fn show_egui_window(&self) {
-            ll("🎯 Main thread here! Creating egui window...");
-
             // Get the MainThreadMarker since we are on the main thread.
             let mtm = MainThreadMarker::from(self);
+
+            // Check if we already have a window
+            if let Some(ref window) = self.ivars().window {
+                if window.isVisible() {
+                    ll("🙈 Window is visible, hiding it...");
+                    window.orderOut(None);
+                    return;
+                } else {
+                    ll("👁️ Window exists but hidden, showing it...");
+                    unsafe {
+                        let _: () = objc2::msg_send![self, showExistingWindow: &**window];
+                    }
+                    return;
+                }
+            }
+
+            ll("🎯 Creating new egui window...");
 
             // First, activate the application to bring it to focus - use aggressive activation
             ll("🔍 Activating application with force...");
@@ -119,12 +136,9 @@ define_class!(
             // Use the old method that forces activation even when another app is active
             app.activateIgnoringOtherApps(true);
 
-            // For now, we create a new window every time. A real app would likely
-            // want to cache and reuse the window.
+            // Create a borderless window for popup-style UI
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
-            let style_mask = NSWindowStyleMask::Titled
-                | NSWindowStyleMask::Closable
-                | NSWindowStyleMask::Resizable;
+            let style_mask = NSWindowStyleMask::Borderless;
             let backing_store_type = NSBackingStoreType::Buffered;
 
             // Use the alloc/init pattern for creating a window with parameters.
@@ -138,13 +152,15 @@ define_class!(
                     false, // defer
                 )
             };
-            let title = NSString::from_str("Trrpy");
-            window.setTitle(&title);
+            // No title for borderless window
             window.center();
 
             // Set window level to floating to ensure it appears above other apps
             ll("🔝 Setting window level to floating...");
             window.setLevel(3); // NSFloatingWindowLevel = 3
+
+            // Enable mouse moved events for borderless window
+            window.setAcceptsMouseMovedEvents(true);
 
             // Create and set window delegate to handle close events
             let window_delegate = WindowDelegate::new(mtm);
@@ -163,6 +179,13 @@ define_class!(
 
             // IMPORTANT: Initialize the egui/wgpu state *after* the view is in the window.
             view.init_state();
+
+            // Store the window reference for future show/hide operations
+            // Safety: We need to get a mutable reference to the ivars
+            let ivars_ptr = self.ivars() as *const Ivars as *mut Ivars;
+            unsafe {
+                (*ivars_ptr).window = Some(window.clone());
+            }
 
             // Show and focus the window
             ll("🪟 Making window key and ordering front...");
@@ -200,6 +223,7 @@ define_class!(
             window.center();
 
             // Final activation to ensure focus
+            #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
 
             // Add small delay to allow focus changes to take effect
@@ -212,13 +236,57 @@ define_class!(
 
             ll("✅ Window setup and aggressive focusing complete!");
         }
+
+        #[unsafe(method(showExistingWindow:))]
+        fn show_existing_window(&self, window: &NSWindow) {
+            ll("🔍 Showing existing window with aggressive focus...");
+
+            // Get the MainThreadMarker since we are on the main thread.
+            let mtm = MainThreadMarker::from(self);
+            let app = NSApplication::sharedApplication(mtm);
+
+            // Aggressive activation
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
+
+            // Show and focus the window
+            window.makeKeyAndOrderFront(None);
+
+            unsafe {
+                window.orderFrontRegardless();
+            }
+
+            // Additional focus operations
+            unsafe {
+                let _: () = objc2::msg_send![&app, arrangeInFront: std::ptr::null::<objc2_foundation::NSObject>()];
+                window.orderWindow_relativeTo(objc2_app_kit::NSWindowOrderingMode::Above, 0);
+            }
+
+            // Make first responder
+            if let Some(content_view) = window.contentView() {
+                window.makeFirstResponder(Some(&content_view));
+            }
+
+            // // Request attention
+            // app.requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::CriticalRequest);
+
+            // Allow focus changes to process
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            // Final activation
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
+            window.makeKeyAndOrderFront(None);
+
+            ll("✅ Existing window focused!");
+        }
     }
 );
 
 impl AppDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm);
-        let this = this.set_ivars(());
+        let this = this.set_ivars(Ivars { window: None });
         unsafe { msg_send![super(this), init] }
     }
 }

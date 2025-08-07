@@ -28,7 +28,7 @@ impl TrrpyApp {
             self.mouse_pos = pointer_pos;
         }
 
-        // Capture last pressed key
+        // Capture last pressed key for display
         ctx.input(|i| {
             for event in &i.events {
                 if let egui::Event::Key {
@@ -93,9 +93,11 @@ impl TrrpyApp {
             ui.label("• Press various keys");
 
             ui.separator();
-            if ui.button("Close Window").clicked() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+            ui.colored_label(
+                egui::Color32::from_rgb(100, 149, 237),
+                "💡 Press ESC or hotkey (Cmd+Shift+K) to hide",
+            );
+            ui.label("🔑 ESC key is fully functional for quick dismissal");
         });
     }
 }
