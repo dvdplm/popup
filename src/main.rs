@@ -4,13 +4,37 @@ mod hotkey;
 mod trrpy;
 mod utils;
 
+fn restore_previous_app_focus(window: &CustomWindow) {
+    if let Some(content_view) = window.contentView() {
+        let egui_view: &crate::egui_view::EguiView = unsafe {
+            &*((&*content_view) as *const objc2_app_kit::NSView
+                as *const crate::egui_view::EguiView)
+        };
+        if let Some(state) = egui_view.ivars().state.get() {
+            if let Some(pid) = state.app.borrow().prev_app_pid {
+                let running_app_class = objc2::runtime::AnyClass::get(
+                    std::ffi::CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap(),
+                )
+                .unwrap();
+                let prev_app: *mut objc2::runtime::AnyObject = unsafe {
+                    objc2::msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
+                };
+                if !prev_app.is_null() {
+                    let _: bool =
+                        unsafe { objc2::msg_send![prev_app, activateWithOptions: 1u64 << 1] };
+                }
+            }
+        }
+    }
+}
+
 use crate::egui_view::EguiView;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -45,7 +69,7 @@ define_class!(
 );
 
 #[derive(Debug)]
-pub(crate) struct Ivars {
+pub(crate) struct AppIvars {
     window: Option<Retained<CustomWindow>>,
 }
 
@@ -85,7 +109,7 @@ define_class!(
     // - `AppDelegate` does not implement `Drop`.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[ivars = Ivars]
+    #[ivars = AppIvars]
     struct AppDelegate;
 
     unsafe impl NSObjectProtocol for AppDelegate {}
@@ -136,11 +160,45 @@ define_class!(
 
             // Check if we already have a window
             if let Some(ref window) = self.ivars().window {
+                // Always store the previous frontmost app PID before showing/toggling
+                unsafe {
+                    let workspace = NSWorkspace::sharedWorkspace();
+                    let active_app = workspace.frontmostApplication();
+                    if let Some(app_obj) = active_app {
+                        let pid: i32 = objc2::msg_send![&*app_obj, processIdentifier];
+                        if let Some(content_view) = (&*window).contentView() {
+                            let egui_view: &EguiView =
+                                &*((&*content_view) as *const NSView as *const EguiView);
+                            if let Some(state) = egui_view.ivars().state.get() {
+                                state.app.borrow_mut().prev_app_pid = Some(pid as u32);
+                                ll(&format!("🔙 Stored previous app PID in TrrpyApp: {}", pid));
+                            }
+                        }
+                    }
+                }
                 if (&*window).isVisible() {
                     ll("🙈 Window is visible, hiding it...");
                     (&*window).orderOut(None);
+                    restore_previous_app_focus(&*window);
                     return;
                 } else {
+                    // Always store the previous frontmost app PID before showing/toggling
+                    unsafe {
+                        let workspace = NSWorkspace::sharedWorkspace();
+                        let active_app = workspace.frontmostApplication();
+                        if let Some(app_obj) = active_app {
+                            let pid: i32 = objc2::msg_send![&*app_obj, processIdentifier];
+                            if let Some(content_view) = (&*window).contentView() {
+                                let egui_view: &EguiView = &*((&*content_view)
+                                    as *const objc2_app_kit::NSView
+                                    as *const EguiView);
+                                if let Some(state) = egui_view.ivars().state.get() {
+                                    state.app.borrow_mut().prev_app_pid = Some(pid as u32);
+                                    ll(&format!("🔙 Stored previous app PID in TrrpyApp: {}", pid));
+                                }
+                            }
+                        }
+                    }
                     ll("👁️ Window exists but hidden, showing it...");
                     unsafe {
                         let _: () = objc2::msg_send![self, showExistingWindow: &**window];
@@ -154,6 +212,7 @@ define_class!(
             // First, activate the application to bring it to focus - use aggressive activation
             ll("🔍 Activating application with force...");
             let app = NSApplication::sharedApplication(mtm);
+
             // Use the old method that forces activation even when another app is active
             #[allow(deprecated)]
             app.activateIgnoringOtherApps(true);
@@ -198,10 +257,22 @@ define_class!(
 
             // IMPORTANT: Initialize the egui/wgpu state *after* the view is in the window.
             view.init_state();
+            // Store the previous frontmost app PID before activating ourselves
+            unsafe {
+                let workspace = NSWorkspace::sharedWorkspace();
+                let active_app = workspace.frontmostApplication();
+                if let Some(app_obj) = active_app {
+                    let pid: i32 = objc2::msg_send![&*app_obj, processIdentifier]; // TODO check for -1
+                    if let Some(state) = view.ivars().state.get() {
+                        state.app.borrow_mut().prev_app_pid = Some(pid as u32);
+                        ll(&format!("🔙 Stored previous app PID in TrrpyApp: {}", pid));
+                    }
+                }
+            }
 
             // Store the window reference for future show/hide operations
             // Safety: We need to get a mutable reference to the ivars
-            let ivars_ptr = self.ivars() as *const Ivars as *mut Ivars;
+            let ivars_ptr = self.ivars() as *const AppIvars as *mut AppIvars;
             unsafe {
                 (*ivars_ptr).window = Some(window.clone());
             }
@@ -305,7 +376,7 @@ define_class!(
 impl AppDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm);
-        let this = this.set_ivars(Ivars { window: None });
+        let this = this.set_ivars(AppIvars { window: None });
         unsafe { msg_send![super(this), init] }
     }
 }

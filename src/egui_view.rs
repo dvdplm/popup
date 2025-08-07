@@ -13,20 +13,21 @@ use egui_wgpu::wgpu::{
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::NSView;
-use objc2_foundation::{NSPoint, NSRect};
+use objc2_foundation::{NSNumber, NSPoint, NSRect};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::fmt::Debug;
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime};
 
 /// This struct will hold the state for our custom egui view.
 /// It's stored in an Ivar in the `EguiView` Objective-C object.
-struct EguiViewState {
+pub(crate) struct EguiViewState {
     /// The egui context, which manages all UI state.
     ctx: Context,
     /// The user's application state (the `eframe::App` implementation).
-    app: RefCell<TrrpyApp>,
+    pub(crate) app: RefCell<TrrpyApp>,
     /// The wgpu renderer for egui.
     renderer: RefCell<Renderer>,
     /// The wgpu surface to render to.
@@ -139,7 +140,7 @@ pub(crate) struct Ivars {
     // An instance variable (ivar) to hold a pointer to our Rust state.
     // We use a `Box<OnceLock<...>>` to allow for lazy, one-time initialization
     // after the view has been created and added to a window.
-    state: Box<OnceLock<EguiViewState>>,
+    pub(crate) state: Box<OnceLock<EguiViewState>>,
 }
 define_class!(
     /// A custom `NSView` that is responsible for hosting and rendering an `egui` UI.
@@ -228,6 +229,21 @@ define_class!(
                 if state.app.borrow().esc_pressed {
                     if let Some(window) = self.window() {
                         window.orderOut(None);
+                    }
+                    // Restore focus to previous app if PID is available (from TrrpyApp)
+                    let prev_app_pid = state.app.borrow().prev_app_pid; // TODO: should probably `take()` here so we clear the pid.
+                    if let Some(pid) = prev_app_pid {
+                        let running_app_class = objc2::runtime::AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
+                        let prev_app: *mut objc2::runtime::AnyObject = unsafe {
+                            objc2::msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
+                        };
+                        if !prev_app.is_null() {
+                            let _: bool = unsafe { objc2::msg_send![prev_app, activateWithOptions: 1u64 << 1] }; // NSApplicationActivateIgnoringOtherApps
+                        } else {
+                            ll(&format!("prev_app is null"))
+                        }
+                    } else {
+                        ll(&format!("No previous app PID: {:?}", prev_app_pid))
                     }
                     state.app.borrow_mut().esc_pressed = false; // Reset flag
                     return;

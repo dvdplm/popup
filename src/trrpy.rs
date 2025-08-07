@@ -8,6 +8,7 @@ pub struct TrrpyApp {
     mouse_pos: egui::Pos2,
     last_key: Option<String>,
     pub esc_pressed: bool,
+    pub prev_app_pid: Option<u32>,
 }
 
 impl Default for TrrpyApp {
@@ -19,6 +20,7 @@ impl Default for TrrpyApp {
             mouse_pos: egui::Pos2::ZERO,
             last_key: None,
             esc_pressed: false,
+            prev_app_pid: None,
         }
     }
 }
