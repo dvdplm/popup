@@ -7,6 +7,7 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+mod blitzortung;
 mod hotkey;
 mod trrpy;
 mod ui;

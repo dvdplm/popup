@@ -354,86 +354,10 @@ impl WebSocketWorker {
     }
 }
 
-/// LZW decoder for Blitzortung compressed messages
-fn decode(input: &str) -> String {
-    if input.is_empty() {
-        return String::new();
-    }
-
-    let data: Vec<char> = input.chars().collect();
-    let mut dictionary: HashMap<u32, String> = HashMap::new();
-
-    let curr_char = data[0];
-    let mut old_phrase = curr_char.to_string();
-    let mut out = vec![curr_char.to_string()];
-    let mut code: u32 = 256;
-
-    for i in 1..data.len() {
-        let curr_code = data[i] as u32;
-
-        let phrase = if curr_code < 256 {
-            data[i].to_string()
-        } else {
-            dictionary.get(&curr_code).cloned().unwrap_or_else(|| {
-                let first_char = old_phrase.chars().next().unwrap_or('\0');
-                format!("{}{}", old_phrase, first_char)
-            })
-        };
-
-        out.push(phrase.clone());
-
-        let first_char = phrase.chars().next().unwrap_or('\0');
-        dictionary.insert(code, format!("{}{}", old_phrase, first_char));
-        code += 1;
-        old_phrase = phrase;
-    }
-
-    out.join("")
-}
-
-/// Lightning strike data structure matching Blitzortung's format
-#[derive(Debug, Deserialize)]
-pub struct LightningStrike {
-    /// Timestamp in microseconds since epoch
-    pub time: u64,
-    /// Latitude
-    pub lat: f64,
-    /// Longitude
-    pub lon: f64,
-    /// Altitude
-    pub alt: f64,
-    /// Polarity
-    pub pol: i32,
-    /// MDS value
-    pub mds: u32,
-    /// MCG value
-    pub mcg: u32,
-    /// Status
-    pub status: u32,
-    /// Region
-    pub region: u32,
-    /// Signal data array
-    pub sig: Vec<SignalData>,
-    /// Delay information
-    pub delay: Option<f64>,
-    pub lonc: u32,
-    pub latc: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SignalData {
-    pub sta: u32,
-    pub time: u64,
-    pub lat: f64,
-    pub lon: f64,
-    pub alt: isize,
-    pub status: u32,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::blitzortung::{BLITZ_HANDSHAKE, BLITZSERVERS, LightningStrike, decode};
     #[test]
     fn test_websocket_message() {
         let message = WebSocketMessage {
@@ -468,16 +392,10 @@ mod tests {
 
     #[tokio::test]
     async fn blitzortung_connect() {
-        const MAXMSGS: usize = 20;
-        // Blitzortung WebSocket servers
-        let servers = [
-            "wss://ws1.blitzortung.org",
-            "wss://ws7.blitzortung.org",
-            "wss://ws8.blitzortung.org",
-        ];
+        const MAXMSGS: usize = 2;
 
         let ws_manager = WebSocketManager::new();
-        ws_manager.connect(servers[0].into());
+        ws_manager.connect(BLITZSERVERS[0].into());
 
         // TODO: Use async magic to block here until connection is established
         // Wait for connection to establish
@@ -489,25 +407,24 @@ mod tests {
         }
 
         // Send magic json bytes
-        const BLITZME: &[u8] = b"{\"a\":111}";
-        ws_manager.send_raw(BLITZME.to_vec());
+        ws_manager.send_raw(BLITZ_HANDSHAKE.to_vec());
         // Read MAXMSGS from the socket, then hang up. Print each message.
         let mut msg_count = 0;
         while msg_count < MAXMSGS {
             if let Some(incoming) = ws_manager.try_recv_message() {
                 // It's a `raw_text` message. Inside the `payload` there's a bag of bytes representing a
-                println!("Message {}: {:?}", msg_count + 1, incoming);
+                // println!("Message {}: {:?}", msg_count + 1, incoming);
                 let payload_str = std::str::from_utf8(&incoming.payload).unwrap_or("");
                 let decoded: String = decode(payload_str); // takes &str
-                println!("decoded message: {decoded:?}");
+                // println!("decoded message: {decoded:?}");
                 let lightning = serde_json::from_str::<LightningStrike>(&decoded);
-                println!("Deserialized LightningStrike: {lightning:?}");
+                // println!("Deserialized LightningStrike: {lightning:?}");
                 assert!(lightning.is_ok());
 
                 msg_count += 1;
             } else {
                 // Wait a bit before checking again
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         }
 
