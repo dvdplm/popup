@@ -1,8 +1,8 @@
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc;
 use std::thread;
+use std::{collections::HashMap, sync::mpsc};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -10,9 +10,9 @@ use crate::utils::ll;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSocketMessage {
-    pub message_type: String,
-    pub data: serde_json::Value,
-    pub timestamp: u64,
+    pub mtype: String,
+    pub payload: Vec<u8>,
+    pub ts: u64,
 }
 
 #[derive(Debug)]
@@ -26,6 +26,7 @@ pub enum WebSocketCommand {
     Connect(String),
     Disconnect,
     Send(WebSocketMessage),
+    SendRaw(Vec<u8>),
 }
 
 impl WebSocketManager {
@@ -66,6 +67,12 @@ impl WebSocketManager {
     pub fn send_message(&self, message: WebSocketMessage) {
         if let Err(e) = self.tx.send(WebSocketCommand::Send(message)) {
             ll(&format!("❌ Failed to send message command: {}", e));
+        }
+    }
+
+    pub fn send_raw(&self, payload: Vec<u8>) {
+        if let Err(e) = self.tx.send(WebSocketCommand::SendRaw(payload)) {
+            ll(&format!("❌ Failed to send raw message command: {}", e));
         }
     }
 
@@ -111,6 +118,9 @@ impl WebSocketWorker {
                     }
                     WebSocketCommand::Send(message) => {
                         self.send_message(message).await;
+                    }
+                    WebSocketCommand::SendRaw(payload) => {
+                        self.send_raw(payload).await;
                     }
                 }
             }
@@ -161,12 +171,13 @@ impl WebSocketWorker {
 
                 // Send a connection success message
                 let msg = WebSocketMessage {
-                    message_type: "connection_status".to_string(),
-                    data: serde_json::json!({
+                    mtype: "connection_status".to_string(),
+                    payload: serde_json::to_vec(&serde_json::json!({
                         "status": "connected",
                         "url": url
-                    }),
-                    timestamp: std::time::SystemTime::now()
+                    }))
+                    .unwrap(),
+                    ts: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs(),
@@ -181,13 +192,14 @@ impl WebSocketWorker {
 
                 // Send a connection failure message
                 let msg = WebSocketMessage {
-                    message_type: "connection_status".to_string(),
-                    data: serde_json::json!({
+                    mtype: "connection_status".to_string(),
+                    payload: serde_json::to_vec(&serde_json::json!({
                         "status": "failed",
                         "error": e.to_string(),
                         "url": url
-                    }),
-                    timestamp: std::time::SystemTime::now()
+                    }))
+                    .unwrap(),
+                    ts: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs(),
@@ -213,11 +225,12 @@ impl WebSocketWorker {
 
             // Send a disconnection message
             let msg = WebSocketMessage {
-                message_type: "connection_status".to_string(),
-                data: serde_json::json!({
+                mtype: "connection_status".to_string(),
+                payload: serde_json::to_vec(&serde_json::json!({
                     "status": "disconnected"
-                }),
-                timestamp: std::time::SystemTime::now()
+                }))
+                .unwrap(),
+                ts: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs(),
@@ -231,12 +244,13 @@ impl WebSocketWorker {
 
     async fn send_message(&mut self, message: WebSocketMessage) {
         if let Some(ref mut ws_stream) = self.connection {
+            ll(&format!("Sending {:?}", serde_json::to_string(&message)));
             match serde_json::to_string(&message) {
                 Ok(json_str) => {
                     if let Err(e) = ws_stream.send(Message::Text(json_str)).await {
                         ll(&format!("❌ Failed to send WebSocket message: {}", e));
                     } else {
-                        ll("📤 Sent WebSocket message");
+                        ll(&format!("📤 Sent WebSocket message"));
                     }
                 }
                 Err(e) => {
@@ -246,6 +260,16 @@ impl WebSocketWorker {
         } else {
             ll("⚠️ Cannot send message: WebSocket not connected");
         }
+    }
+
+    async fn send_raw(&mut self, payload: Vec<u8>) {
+        if let Some(ref mut ws_stream) = self.connection {
+            match ws_stream.send(Message::Binary(payload)).await {
+                Ok(r) => ll(&format!("raw send ok: {r:?}")),
+                Err(e) => ll(&format!("raw send fail: {e:?}")),
+            };
+        }
+        ()
     }
 
     async fn handle_incoming_message(&mut self, msg: Message) {
@@ -263,18 +287,21 @@ impl WebSocketWorker {
                         }
                     }
                     Err(e) => {
-                        ll(&format!(
-                            "⚠️ Failed to parse incoming message as WebSocketMessage: {}",
-                            e
-                        ));
+                        // TODO: this isn't really an error, shouldn't treat it as such.
+                        // ll(&format!(
+                        //     "⚠️ Failed to parse incoming message as WebSocketMessage: {}",
+                        //     e
+                        // ));
 
                         // Send a raw message for unstructured data
                         let raw_message = WebSocketMessage {
-                            message_type: "raw_text".to_string(),
-                            data: serde_json::json!({
-                                "text": text
-                            }),
-                            timestamp: std::time::SystemTime::now()
+                            mtype: "raw_text".to_string(),
+                            payload: text.into_bytes(),
+                            // payload: serde_json::to_vec(&serde_json::json!({
+                            //     "text": text
+                            // }))
+                            // .unwrap(),
+                            ts: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap()
                                 .as_secs(),
@@ -290,12 +317,13 @@ impl WebSocketWorker {
                 ll(&format!("📥 Received binary message: {} bytes", data.len()));
 
                 let binary_message = WebSocketMessage {
-                    message_type: "binary".to_string(),
-                    data: serde_json::json!({
+                    mtype: "binary".to_string(),
+                    payload: serde_json::to_vec(&serde_json::json!({
                         "size": data.len(),
                         "data": base64::engine::general_purpose::STANDARD.encode(&data)
-                    }),
-                    timestamp: std::time::SystemTime::now()
+                    }))
+                    .unwrap(),
+                    ts: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs(),
@@ -323,5 +351,166 @@ impl WebSocketWorker {
                 ll("📦 Received frame message (should not happen in this context)");
             }
         }
+    }
+}
+
+/// LZW decoder for Blitzortung compressed messages
+fn decode(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+
+    let data: Vec<char> = input.chars().collect();
+    let mut dictionary: HashMap<u32, String> = HashMap::new();
+
+    let curr_char = data[0];
+    let mut old_phrase = curr_char.to_string();
+    let mut out = vec![curr_char.to_string()];
+    let mut code: u32 = 256;
+
+    for i in 1..data.len() {
+        let curr_code = data[i] as u32;
+
+        let phrase = if curr_code < 256 {
+            data[i].to_string()
+        } else {
+            dictionary.get(&curr_code).cloned().unwrap_or_else(|| {
+                let first_char = old_phrase.chars().next().unwrap_or('\0');
+                format!("{}{}", old_phrase, first_char)
+            })
+        };
+
+        out.push(phrase.clone());
+
+        let first_char = phrase.chars().next().unwrap_or('\0');
+        dictionary.insert(code, format!("{}{}", old_phrase, first_char));
+        code += 1;
+        old_phrase = phrase;
+    }
+
+    out.join("")
+}
+
+/// Lightning strike data structure matching Blitzortung's format
+#[derive(Debug, Deserialize)]
+pub struct LightningStrike {
+    /// Timestamp in microseconds since epoch
+    pub time: u64,
+    /// Latitude
+    pub lat: f64,
+    /// Longitude
+    pub lon: f64,
+    /// Altitude
+    pub alt: f64,
+    /// Polarity
+    pub pol: i32,
+    /// MDS value
+    pub mds: u32,
+    /// MCG value
+    pub mcg: u32,
+    /// Status
+    pub status: u32,
+    /// Region
+    pub region: u32,
+    /// Signal data array
+    pub sig: Vec<SignalData>,
+    /// Delay information
+    pub delay: Option<f64>,
+    pub lonc: u32,
+    pub latc: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SignalData {
+    pub sta: u32,
+    pub time: u64,
+    pub lat: f64,
+    pub lon: f64,
+    pub alt: isize,
+    pub status: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_websocket_message() {
+        let message = WebSocketMessage {
+            mtype: "text".to_string(),
+            payload: serde_json::to_vec(&serde_json::json!({
+                "content": "Hello, world!"
+            }))
+            .unwrap(),
+            ts: 1678901234,
+        };
+
+        assert_eq!(message.mtype, "text");
+        // assert_eq!(message.payload["content"], "Hello, world!");
+        assert_eq!(message.ts, 1678901234);
+    }
+
+    #[tokio::test]
+    async fn ws_connection() {
+        let ws_manager = WebSocketManager::new();
+        ws_manager.connect("wss://echo.websocket.org/".to_string());
+
+        // Wait for connection to establish
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Check for connection status message
+        if let Some(incoming) = ws_manager.try_recv_message() {
+            println!("Debug: Full message received: {:?}", incoming);
+            // assert_eq!(status_msg.message_type, "connection_status");
+            // assert_eq!(status_msg.data["status"], "connected");
+        }
+    }
+
+    #[tokio::test]
+    async fn blitzortung_connect() {
+        const MAXMSGS: usize = 20;
+        // Blitzortung WebSocket servers
+        let servers = [
+            "wss://ws1.blitzortung.org",
+            "wss://ws7.blitzortung.org",
+            "wss://ws8.blitzortung.org",
+        ];
+
+        let ws_manager = WebSocketManager::new();
+        ws_manager.connect(servers[0].into());
+
+        // TODO: Use async magic to block here until connection is established
+        // Wait for connection to establish
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Check for connection status message
+        if let Some(incoming) = ws_manager.try_recv_message() {
+            println!("Debug: Full message received: {:?}", incoming);
+        }
+
+        // Send magic json bytes
+        const BLITZME: &[u8] = b"{\"a\":111}";
+        ws_manager.send_raw(BLITZME.to_vec());
+        // Read MAXMSGS from the socket, then hang up. Print each message.
+        let mut msg_count = 0;
+        while msg_count < MAXMSGS {
+            if let Some(incoming) = ws_manager.try_recv_message() {
+                // It's a `raw_text` message. Inside the `payload` there's a bag of bytes representing a
+                println!("Message {}: {:?}", msg_count + 1, incoming);
+                let payload_str = std::str::from_utf8(&incoming.payload).unwrap_or("");
+                let decoded: String = decode(payload_str); // takes &str
+                println!("decoded message: {decoded:?}");
+                let lightning = serde_json::from_str::<LightningStrike>(&decoded);
+                println!("Deserialized LightningStrike: {lightning:?}");
+                assert!(lightning.is_ok());
+
+                msg_count += 1;
+            } else {
+                // Wait a bit before checking again
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
+
+        ws_manager.disconnect();
     }
 }

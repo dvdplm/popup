@@ -1,3 +1,4 @@
+use crate::utils::ll;
 use crate::websocket::{WebSocketManager, WebSocketMessage};
 use egui;
 use std::sync::Arc;
@@ -225,10 +226,12 @@ impl TrrpyApp {
             if let Ok(mgr) = manager.lock() {
                 while let Some(message) = mgr.try_recv_message() {
                     // Update connection status based on message type
-                    if message.message_type == "connection_status" {
-                        if let Some(status) = message.data.get("status") {
-                            self.connection_status =
-                                status.as_str().unwrap_or("Unknown").to_owned();
+                    if message.mtype == "connection_status" {
+                        let payload = String::from_utf8(message.payload.clone());
+                        if let Ok(payload) = payload {
+                            self.connection_status = payload
+                        } else {
+                            ll(&format!("Unexpected connection_status messag: {payload:?}"));
                         }
                     }
 
