@@ -13,7 +13,7 @@ use egui_wgpu::wgpu::{
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::NSView;
-use objc2_foundation::{NSNumber, NSPoint, NSRect};
+use objc2_foundation::{NSPoint, NSRect};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -229,10 +229,10 @@ define_class!(
                 if state.app.borrow().esc_pressed {
                     if let Some(window) = self.window() {
                         window.orderOut(None);
-                        crate::restore_previous_app_focus(&*window);
+                        crate::hotkey::restore_focus(&*window);
                     }
                     // Restore focus to previous app if PID is available (from TrrpyApp)
-                    let prev_app_pid = state.app.borrow().prev_app_pid; // TODO: should probably `take()` here so we clear the pid.
+                    let prev_app_pid = state.app.borrow().prev_pid; // TODO: should probably `take()` here so we clear the pid.
                     if let Some(pid) = prev_app_pid {
                         let running_app_class = objc2::runtime::AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
                         let prev_app: *mut objc2::runtime::AnyObject = unsafe {
@@ -260,7 +260,7 @@ define_class!(
                                 // Hide the window instead of terminating
                                 if let Some(window) = self.window() {
                                     window.orderOut(None);
-                                    crate::restore_previous_app_focus(&*window);
+                                    crate::hotkey::restore_focus(&*window);
                                 }
                                 return;
                             }

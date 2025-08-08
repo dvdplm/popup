@@ -2,25 +2,23 @@ use egui;
 
 #[derive(Debug)]
 pub struct TrrpyApp {
-    name: String,
     counter: i32,
     text_input: String,
     mouse_pos: egui::Pos2,
     last_key: Option<String>,
     pub esc_pressed: bool,
-    pub prev_app_pid: Option<u32>,
+    pub prev_pid: Option<u32>,
 }
 
 impl Default for TrrpyApp {
     fn default() -> Self {
         Self {
-            name: "Trrpy".to_owned(),
             counter: 0,
             text_input: "Type something here...".to_owned(),
             mouse_pos: egui::Pos2::ZERO,
             last_key: None,
             esc_pressed: false,
-            prev_app_pid: None,
+            prev_pid: None,
         }
     }
 }
