@@ -11,6 +11,7 @@ mod hotkey;
 mod trrpy;
 mod ui;
 mod utils;
+mod websocket;
 
 // Global reference to NSApplication for signal handler
 static APP_INSTANCE: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mut());

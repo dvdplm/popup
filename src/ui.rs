@@ -11,13 +11,15 @@ use egui_wgpu::wgpu::{
     },
 };
 use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::NSView;
 use objc2_foundation::{NSPoint, NSRect};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{CStr, c_void};
 use std::fmt::Debug;
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime};
 
@@ -234,12 +236,12 @@ define_class!(
                     // Restore focus to previous app if PID is available (from TrrpyApp)
                     let prev_app_pid = state.app.borrow().prev_pid; // TODO: should probably `take()` here so we clear the pid.
                     if let Some(pid) = prev_app_pid {
-                        let running_app_class = objc2::runtime::AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
-                        let prev_app: *mut objc2::runtime::AnyObject = unsafe {
-                            objc2::msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
+                        let running_app_class = AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
+                        let prev_app: *mut AnyObject = unsafe {
+                            msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
                         };
                         if !prev_app.is_null() {
-                            let _: bool = unsafe { objc2::msg_send![prev_app, activateWithOptions: 1u64 << 1] }; // NSApplicationActivateIgnoringOtherApps
+                            let _: bool = unsafe { msg_send![prev_app, activateWithOptions: 1u64 << 1] }; // NSApplicationActivateIgnoringOtherApps
                         } else {
                             ll(&format!("prev_app is null"))
                         }
@@ -296,17 +298,6 @@ define_class!(
                 state.renderer.borrow_mut().free_texture(id);
             }
 
-            // Upload all resources to the GPU.
-            for (id, image_delta) in &full_output.textures_delta.set {
-                state
-                    .renderer
-                    .borrow_mut()
-                    .update_texture(&state.device, &state.queue, *id, image_delta);
-            }
-            for id in &full_output.textures_delta.free {
-                state.renderer.borrow_mut().free_texture(id);
-            }
-
             let mut renderer = state.renderer.borrow_mut();
             renderer.update_buffers(
                 &state.device,
@@ -355,9 +346,9 @@ define_class!(
 
         /// Handle mouse down events
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: *mut objc2::runtime::AnyObject) {
+        fn mouse_down(&self, event: *mut AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
+                let location: NSPoint = unsafe { msg_send![event, locationInWindow] };
                 let local_point = self.convertPoint_fromView(location, None);
                 let view_height = self.frame().size.height;
 
@@ -377,9 +368,9 @@ define_class!(
 
         /// Handle mouse up events
         #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, event: *mut objc2::runtime::AnyObject) {
+        fn mouse_up(&self, event: *mut AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
+                let location: NSPoint = unsafe { msg_send![event, locationInWindow] };
                 let local_point = self.convertPoint_fromView(location, None);
                 let view_height = self.frame().size.height;
 
@@ -399,9 +390,9 @@ define_class!(
 
         /// Handle mouse moved events
         #[unsafe(method(mouseMoved:))]
-        fn mouse_moved(&self, event: *mut objc2::runtime::AnyObject) {
+        fn mouse_moved(&self, event: *mut AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
+                let location: NSPoint = unsafe { msg_send![event, locationInWindow] };
                 let local_point = self.convertPoint_fromView(location, None);
                 let view_height = self.frame().size.height;
 
@@ -416,9 +407,9 @@ define_class!(
 
         /// Handle mouse dragged events
         #[unsafe(method(mouseDragged:))]
-        fn mouse_dragged(&self, event: *mut objc2::runtime::AnyObject) {
+        fn mouse_dragged(&self, event: *mut AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
+                let location: NSPoint = unsafe { msg_send![event, locationInWindow] };
                 let local_point = self.convertPoint_fromView(location, None);
                 let view_height = self.frame().size.height;
 
@@ -433,11 +424,11 @@ define_class!(
 
         /// Handle key down events
         #[unsafe(method(keyDown:))]
-        fn key_down(&self, event: *mut objc2::runtime::AnyObject) {
+        fn key_down(&self, event: *mut AnyObject) {
             let mut handled = false;
             if let Some(state) = self.ivars().state.get() {
-                let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
-                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
+                let keycode: u16 = unsafe { msg_send![event, keyCode] };
+                let modifier_flags: u64 = unsafe { msg_send![event, modifierFlags] };
 
                 let modifiers = state.ns_modifiers_to_egui(modifier_flags);
                 *state.modifiers.borrow_mut() = modifiers;
@@ -454,12 +445,12 @@ define_class!(
                 }
 
                 // Handle text input
-                let characters: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![event, characters] };
+                let characters: *mut AnyObject = unsafe { msg_send![event, characters] };
                 if !characters.is_null() {
-                    let length: usize = unsafe { objc2::msg_send![characters, length] };
+                    let length: usize = unsafe { msg_send![characters, length] };
                     if length > 0 {
                         for i in 0..length {
-                            let ch: u16 = unsafe { objc2::msg_send![characters, characterAtIndex: i] };
+                            let ch: u16 = unsafe { msg_send![characters, characterAtIndex: i] };
                             if let Some(unicode_char) = char::from_u32(ch as u32) {
                                 if unicode_char.is_control() {
                                     continue;
@@ -474,17 +465,17 @@ define_class!(
                 unsafe { self.setNeedsDisplay(true) };
             }
             if !handled {
-                unsafe { objc2::msg_send![super(self), keyDown: event] }
+                unsafe { msg_send![super(self), keyDown: event] }
             }
         }
 
         /// Handle key up events
         #[unsafe(method(keyUp:))]
-        fn key_up(&self, event: *mut objc2::runtime::AnyObject) {
+        fn key_up(&self, event: *mut AnyObject) {
             let mut handled = false;
             if let Some(state) = self.ivars().state.get() {
-                let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
-                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
+                let keycode: u16 = unsafe { msg_send![event, keyCode] };
+                let modifier_flags: u64 = unsafe { msg_send![event, modifierFlags] };
 
                 let modifiers = state.ns_modifiers_to_egui(modifier_flags);
                 *state.modifiers.borrow_mut() = modifiers;
@@ -503,15 +494,15 @@ define_class!(
                 unsafe { self.setNeedsDisplay(true) };
             }
             if !handled {
-                unsafe { objc2::msg_send![super(self), keyUp: event] }
+                unsafe { msg_send![super(self), keyUp: event] }
             }
         }
 
         /// Handle modifier key changes
         #[unsafe(method(flagsChanged:))]
-        fn flags_changed(&self, event: *mut objc2::runtime::AnyObject) {
+        fn flags_changed(&self, event: *mut AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
+                let modifier_flags: u64 = unsafe { msg_send![event, modifierFlags] };
                 let modifiers = state.ns_modifiers_to_egui(modifier_flags);
                 *state.modifiers.borrow_mut() = modifiers;
 
@@ -521,10 +512,10 @@ define_class!(
 
         /// Handle scroll wheel events
         #[unsafe(method(scrollWheel:))]
-        fn scroll_wheel(&self, event: *mut objc2::runtime::AnyObject) {
+        fn scroll_wheel(&self, event: *mut AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let delta_x: f64 = unsafe { objc2::msg_send![event, scrollingDeltaX] };
-                let delta_y: f64 = unsafe { objc2::msg_send![event, scrollingDeltaY] };
+                let delta_x: f64 = unsafe { msg_send![event, scrollingDeltaX] };
+                let delta_y: f64 = unsafe { msg_send![event, scrollingDeltaY] };
 
                 // Convert to egui's scroll delta (positive means scroll up/right)
                 let delta = Vec2::new(delta_x as f32, delta_y as f32);
@@ -545,8 +536,8 @@ define_class!(
 /// directly to `wgpu`'s `create_surface` method (for wgpu v0.25).
 impl HasWindowHandle for EguiView {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let view_ptr = self as *const _ as *mut std::ffi::c_void;
-        let view_ptr = std::ptr::NonNull::new(view_ptr).ok_or(HandleError::Unavailable)?;
+        let view_ptr = self as *const _ as *mut c_void;
+        let view_ptr = NonNull::new(view_ptr).ok_or(HandleError::Unavailable)?;
         let wh = AppKitWindowHandle::new(view_ptr);
         let raw = RawWindowHandle::AppKit(wh);
         Ok(unsafe { WindowHandle::borrow_raw(raw) })

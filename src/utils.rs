@@ -1,3 +1,4 @@
+use objc2::{msg_send, sel};
 use objc2::{rc::Retained, runtime::AnyObject};
 use objc2_foundation::{NSObject, NSString};
 use std::ffi::c_int;
@@ -24,8 +25,8 @@ pub(crate) extern "C" fn sigint_handler(_signal: c_int) {
         unsafe {
             let app = &*app_ptr;
             // Use performSelectorOnMainThread to ensure thread safety
-            let selector = objc2::sel!(terminate:);
-            let _: () = objc2::msg_send![app, performSelectorOnMainThread: selector, withObject:std::ptr::null::<NSObject>(), waitUntilDone:false];
+            let selector = sel!(terminate:);
+            let _: () = msg_send![app, performSelectorOnMainThread: selector, withObject:std::ptr::null::<NSObject>(), waitUntilDone:false];
             ll("✅ Cocoa exit.");
         }
     } else {
