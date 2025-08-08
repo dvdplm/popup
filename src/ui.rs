@@ -232,10 +232,12 @@ define_class!(
                     if let Some(window) = self.window() {
                         window.orderOut(None);
                         crate::hotkey::restore_focus(&*window);
+                        // Notify app that popup is now hidden
+                        state.app.borrow_mut().set_popup_visible(false);
                     }
                     // Restore focus to previous app if PID is available (from TrrpyApp)
-                    let prev_app_pid = state.app.borrow().prev_pid; // TODO: should probably `take()` here so we clear the pid.
-                    if let Some(pid) = prev_app_pid {
+                    let prev_pid = state.app.borrow_mut().prev_pid.take();
+                    if let Some(pid) = prev_pid {
                         let running_app_class = AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
                         let prev_app: *mut AnyObject = unsafe {
                             msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
@@ -246,7 +248,7 @@ define_class!(
                             ll(&format!("prev_app is null"))
                         }
                     } else {
-                        ll(&format!("No previous app PID: {:?}", prev_app_pid))
+                        ll(&format!("No previous app PID: {:?}", prev_pid))
                     }
                     state.app.borrow_mut().esc_pressed = false; // Reset flag
                     return;
@@ -263,6 +265,8 @@ define_class!(
                                 if let Some(window) = self.window() {
                                     window.orderOut(None);
                                     crate::hotkey::restore_focus(&*window);
+                                    // Notify app that popup is now hidden
+                                    state.app.borrow_mut().set_popup_visible(false);
                                 }
                                 return;
                             }

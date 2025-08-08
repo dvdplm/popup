@@ -1,8 +1,8 @@
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc;
 use std::thread;
-use std::{collections::HashMap, sync::mpsc};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -275,7 +275,7 @@ impl WebSocketWorker {
     async fn handle_incoming_message(&mut self, msg: Message) {
         match msg {
             Message::Text(text) => {
-                ll(&format!("📥 Received text message: {}", text));
+                // ll(&format!("📥 Received text message: {}", text));
 
                 match serde_json::from_str::<WebSocketMessage>(&text) {
                     Ok(ws_message) => {
@@ -286,21 +286,11 @@ impl WebSocketWorker {
                             ));
                         }
                     }
-                    Err(e) => {
-                        // TODO: this isn't really an error, shouldn't treat it as such.
-                        // ll(&format!(
-                        //     "⚠️ Failed to parse incoming message as WebSocketMessage: {}",
-                        //     e
-                        // ));
-
+                    Err(_e) => {
                         // Send a raw message for unstructured data
                         let raw_message = WebSocketMessage {
                             mtype: "raw_text".to_string(),
                             payload: text.into_bytes(),
-                            // payload: serde_json::to_vec(&serde_json::json!({
-                            //     "text": text
-                            // }))
-                            // .unwrap(),
                             ts: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap()

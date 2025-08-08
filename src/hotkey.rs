@@ -230,6 +230,10 @@ define_class!(
         fn window_should_close(&self, sender: &NSWindow) -> bool {
             ll("🚪 Window close requested - hiding window...");
             sender.orderOut(None);
+            // Notify app that popup is now hidden
+            if let Some(mut app) = egui_app_from_window(sender) {
+                app.set_popup_visible(false);
+            }
             false // Don't actually close the window, just hide it
         }
 
@@ -314,12 +318,20 @@ define_class!(
                     ll("🙈 Window is visible, hiding it...");
                     (&*window).orderOut(None);
                     restore_focus(&*window);
+                    // Notify app that popup is now hidden
+                    if let Some(mut app) = egui_app_from_window(&*window) {
+                        app.set_popup_visible(false);
+                    }
                     return;
                 } else {
                     store_app_pid(&*window);
                     ll("👁️ Window exists but hidden, showing it...");
                     unsafe {
                         let _: () = objc2::msg_send![self, showExistingWindow: &**window];
+                    }
+                    // Notify app that popup is now visible
+                    if let Some(mut app) = egui_app_from_window(&*window) {
+                        app.set_popup_visible(true);
                     }
                     return;
                 }
@@ -441,6 +453,15 @@ define_class!(
             // Final key window operation to ensure focus
             ll("🔑 Final key window operation...");
             window.makeKeyAndOrderFront(None);
+
+            // Notify app that popup is now visible
+            if let Some(content_view) = (&*window).contentView() {
+                let egui_view: &EguiView =
+                    unsafe { &*((&*content_view) as *const NSView as *const EguiView) };
+                if let Some(state) = egui_view.ivars().state.get() {
+                    state.app.borrow_mut().set_popup_visible(true);
+                }
+            }
 
             ll("✅ Window setup and aggressive focusing complete!");
         }
