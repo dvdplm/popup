@@ -17,9 +17,8 @@ use objc2_app_kit::NSView;
 use objc2_foundation::{NSPoint, NSRect};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{CStr, c_void};
+use std::ffi::CStr;
 use std::fmt::Debug;
-use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime};
 
@@ -144,6 +143,7 @@ pub(crate) struct Ivars {
     // after the view has been created and added to a window.
     pub(crate) state: Box<OnceLock<EguiViewState>>,
 }
+
 define_class!(
     /// A custom `NSView` that is responsible for hosting and rendering an `egui` UI.
     // SAFETY:
@@ -164,181 +164,32 @@ define_class!(
                 return;
             };
 
-            let output_frame = match state.surface.get_current_texture() {
-                Ok(frame) => frame,
-                Err(wgpu::SurfaceError::Lost) => {
-                    // Reconfigure the surface if it's lost.
-                    ll("⚠️ wgpu surface lost, reconfiguring...");
-                    state.surface.configure(&state.device, &state.surface_config);
-                    return;
-                }
-                Err(e) => {
-                    ll(&format!("❌ Failed to acquire next swap chain texture: {}", e));
-                    return;
-                }
+            let Some(output_frame) = self.acquire_surface_frame(state) else {
+                return;
             };
 
             let output_view = output_frame
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Collect accumulated events and prepare input for egui
-            let mut events = state.events.borrow_mut();
-            let now = Instant::now();
-            let last_frame_time = *state.last_frame_time.borrow();
-            let frame_time = now.duration_since(last_frame_time);
-            *state.last_frame_time.borrow_mut() = now;
-
-            let mut viewports = HashMap::default();
-            viewports.insert(egui::ViewportId::ROOT, ViewportInfo {
-                native_pixels_per_point: Some(1.0),
-                monitor_size: Some(Vec2::new(1920.0, 1080.0)),
-                inner_rect: Some(egui::Rect::from_min_size(
-                    Pos2::ZERO,
-                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
-                )),
-                outer_rect: Some(egui::Rect::from_min_size(
-                    Pos2::ZERO,
-                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
-                )),
-                ..Default::default()
-            });
-
-            let raw_input = RawInput {
-                viewport_id: egui::ViewportId::ROOT,
-                viewports,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    Pos2::ZERO,
-                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
-                )),
-                max_texture_side: Some(2048),
-                time: Some(SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()),
-                predicted_dt: frame_time.as_secs_f32(),
-                modifiers: *state.modifiers.borrow(),
-                events: events.drain(..).collect(),
-                hovered_files: Vec::new(),
-                dropped_files: Vec::new(),
-                focused: true,
-                system_theme: None,
-            };
+            let raw_input = self.prepare_egui_input(state);
 
             // Run egui and update app state
-                let full_output = state.ctx.run(raw_input, |ctx| {
-                    state.app.borrow_mut().update(ctx);
-                });
+            let full_output = state.ctx.run(raw_input, |ctx| {
+                state.app.borrow_mut().update(ctx);
+            });
 
-                // Hide window if ESC was pressed
-                if state.app.borrow().esc_pressed {
-                    if let Some(window) = self.window() {
-                        window.orderOut(None);
-                        crate::hotkey::restore_focus(&*window);
-                        // Notify app that popup is now hidden
-                        state.app.borrow_mut().set_popup_visible(false);
-                    }
-                    // Restore focus to previous app if PID is available (from TrrpyApp)
-                    let prev_pid = state.app.borrow_mut().prev_pid.take();
-                    if let Some(pid) = prev_pid {
-                        let running_app_class = AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
-                        let prev_app: *mut AnyObject = unsafe {
-                            msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
-                        };
-                        if !prev_app.is_null() {
-                            let _: bool = unsafe { msg_send![prev_app, activateWithOptions: 1u64 << 1] }; // NSApplicationActivateIgnoringOtherApps
-                        } else {
-                            ll(&format!("prev_app is null"))
-                        }
-                    } else {
-                        ll(&format!("No previous app PID: {:?}", prev_pid))
-                    }
-                    state.app.borrow_mut().esc_pressed = false; // Reset flag
-                    return;
-                }
-
-            // Handle viewport commands (like window close)
-            for (viewport_id, viewport_output) in &full_output.viewport_output {
-                if *viewport_id == egui::ViewportId::ROOT {
-                    for command in &viewport_output.commands {
-                        match command {
-                            egui::ViewportCommand::Close => {
-                                ll("🚪 Egui requested window close - hiding window...");
-                                // Hide the window instead of terminating
-                                if let Some(window) = self.window() {
-                                    window.orderOut(None);
-                                    crate::hotkey::restore_focus(&*window);
-                                    // Notify app that popup is now hidden
-                                    state.app.borrow_mut().set_popup_visible(false);
-                                }
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+            // Handle app state changes (ESC key, close commands)
+            if self.handle_app_state_changes(state, &full_output) {
+                return;
             }
 
-            let clipped_primitives = state
-                .ctx
-                .tessellate(full_output.shapes, full_output.pixels_per_point);
+            // Render the frame
+            self.render_frame(state, &full_output, &output_view);
 
-            let screen_descriptor = egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [state.surface_config.width, state.surface_config.height],
-                pixels_per_point: full_output.pixels_per_point,
-            };
-
-            let mut encoder =
-                state
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("egui_command_encoder"),
-                    });
-
-            // Upload all resources to the GPU.
-            for (id, image_delta) in &full_output.textures_delta.set {
-                state
-                    .renderer.borrow_mut()
-                    .update_texture(&state.device, &state.queue, *id, image_delta);
-            }
-            for id in &full_output.textures_delta.free {
-                state.renderer.borrow_mut().free_texture(id);
-            }
-
-            let mut renderer = state.renderer.borrow_mut();
-            renderer.update_buffers(
-                &state.device,
-                &state.queue,
-                &mut encoder,
-                &clipped_primitives,
-                &screen_descriptor,
-            );
-            // Record all render passes.
-            {
-                let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("egui_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &output_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                let mut render_pass = render_pass.forget_lifetime();
-                renderer.render(&mut render_pass, &clipped_primitives, &screen_descriptor);
-            }
-
-
-            // Submit the command buffer.
-            state.queue.submit(Some(encoder.finish()));
+            // Present the frame and schedule next repaint if needed
             output_frame.present();
-
-            let repaint_delay = full_output.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::from_secs(10), |vo| vo.repaint_delay);
-            if repaint_delay.is_zero() {
-                unsafe {self.setNeedsDisplay(true)};
-            }
+            self.schedule_repaint_if_needed(&full_output);
         }
 
         /// Informs AppKit that this view can become the "first responder,"
@@ -350,9 +201,9 @@ define_class!(
 
         /// Handle mouse down events
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: *mut AnyObject) {
+        fn mouse_down(&self, event: *mut objc2::runtime::AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let location: NSPoint = unsafe { msg_send![event, locationInWindow] };
+                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
                 let local_point = self.convertPoint_fromView(location, None);
                 let view_height = self.frame().size.height;
 
@@ -372,9 +223,9 @@ define_class!(
 
         /// Handle mouse up events
         #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, event: *mut AnyObject) {
+        fn mouse_up(&self, event: *mut objc2::runtime::AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let location: NSPoint = unsafe { msg_send![event, locationInWindow] };
+                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
                 let local_point = self.convertPoint_fromView(location, None);
                 let view_height = self.frame().size.height;
 
@@ -394,9 +245,9 @@ define_class!(
 
         /// Handle mouse moved events
         #[unsafe(method(mouseMoved:))]
-        fn mouse_moved(&self, event: *mut AnyObject) {
+        fn mouse_moved(&self, event: *mut objc2::runtime::AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let location: NSPoint = unsafe { msg_send![event, locationInWindow] };
+                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
                 let local_point = self.convertPoint_fromView(location, None);
                 let view_height = self.frame().size.height;
 
@@ -411,9 +262,9 @@ define_class!(
 
         /// Handle mouse dragged events
         #[unsafe(method(mouseDragged:))]
-        fn mouse_dragged(&self, event: *mut AnyObject) {
+        fn mouse_dragged(&self, event: *mut objc2::runtime::AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let location: NSPoint = unsafe { msg_send![event, locationInWindow] };
+                let location: NSPoint = unsafe { objc2::msg_send![event, locationInWindow] };
                 let local_point = self.convertPoint_fromView(location, None);
                 let view_height = self.frame().size.height;
 
@@ -428,11 +279,11 @@ define_class!(
 
         /// Handle key down events
         #[unsafe(method(keyDown:))]
-        fn key_down(&self, event: *mut AnyObject) {
+        fn key_down(&self, event: *mut objc2::runtime::AnyObject) {
             let mut handled = false;
             if let Some(state) = self.ivars().state.get() {
-                let keycode: u16 = unsafe { msg_send![event, keyCode] };
-                let modifier_flags: u64 = unsafe { msg_send![event, modifierFlags] };
+                let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
+                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
 
                 let modifiers = state.ns_modifiers_to_egui(modifier_flags);
                 *state.modifiers.borrow_mut() = modifiers;
@@ -449,12 +300,12 @@ define_class!(
                 }
 
                 // Handle text input
-                let characters: *mut AnyObject = unsafe { msg_send![event, characters] };
+                let characters: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![event, characters] };
                 if !characters.is_null() {
-                    let length: usize = unsafe { msg_send![characters, length] };
+                    let length: usize = unsafe { objc2::msg_send![characters, length] };
                     if length > 0 {
                         for i in 0..length {
-                            let ch: u16 = unsafe { msg_send![characters, characterAtIndex: i] };
+                            let ch: u16 = unsafe { objc2::msg_send![characters, characterAtIndex: i] };
                             if let Some(unicode_char) = char::from_u32(ch as u32) {
                                 if unicode_char.is_control() {
                                     continue;
@@ -469,17 +320,17 @@ define_class!(
                 unsafe { self.setNeedsDisplay(true) };
             }
             if !handled {
-                unsafe { msg_send![super(self), keyDown: event] }
+                unsafe { objc2::msg_send![super(self), keyDown: event] }
             }
         }
 
         /// Handle key up events
         #[unsafe(method(keyUp:))]
-        fn key_up(&self, event: *mut AnyObject) {
+        fn key_up(&self, event: *mut objc2::runtime::AnyObject) {
             let mut handled = false;
             if let Some(state) = self.ivars().state.get() {
-                let keycode: u16 = unsafe { msg_send![event, keyCode] };
-                let modifier_flags: u64 = unsafe { msg_send![event, modifierFlags] };
+                let keycode: u16 = unsafe { objc2::msg_send![event, keyCode] };
+                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
 
                 let modifiers = state.ns_modifiers_to_egui(modifier_flags);
                 *state.modifiers.borrow_mut() = modifiers;
@@ -498,15 +349,15 @@ define_class!(
                 unsafe { self.setNeedsDisplay(true) };
             }
             if !handled {
-                unsafe { msg_send![super(self), keyUp: event] }
+                unsafe { objc2::msg_send![super(self), keyUp: event] }
             }
         }
 
         /// Handle modifier key changes
         #[unsafe(method(flagsChanged:))]
-        fn flags_changed(&self, event: *mut AnyObject) {
+        fn flags_changed(&self, event: *mut objc2::runtime::AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let modifier_flags: u64 = unsafe { msg_send![event, modifierFlags] };
+                let modifier_flags: u64 = unsafe { objc2::msg_send![event, modifierFlags] };
                 let modifiers = state.ns_modifiers_to_egui(modifier_flags);
                 *state.modifiers.borrow_mut() = modifiers;
 
@@ -516,10 +367,10 @@ define_class!(
 
         /// Handle scroll wheel events
         #[unsafe(method(scrollWheel:))]
-        fn scroll_wheel(&self, event: *mut AnyObject) {
+        fn scroll_wheel(&self, event: *mut objc2::runtime::AnyObject) {
             if let Some(state) = self.ivars().state.get() {
-                let delta_x: f64 = unsafe { msg_send![event, scrollingDeltaX] };
-                let delta_y: f64 = unsafe { msg_send![event, scrollingDeltaY] };
+                let delta_x: f64 = unsafe { objc2::msg_send![event, scrollingDeltaX] };
+                let delta_y: f64 = unsafe { objc2::msg_send![event, scrollingDeltaY] };
 
                 // Convert to egui's scroll delta (positive means scroll up/right)
                 let delta = Vec2::new(delta_x as f32, delta_y as f32);
@@ -540,8 +391,8 @@ define_class!(
 /// directly to `wgpu`'s `create_surface` method (for wgpu v0.25).
 impl HasWindowHandle for EguiView {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let view_ptr = self as *const _ as *mut c_void;
-        let view_ptr = NonNull::new(view_ptr).ok_or(HandleError::Unavailable)?;
+        let view_ptr = self as *const _ as *mut std::ffi::c_void;
+        let view_ptr = std::ptr::NonNull::new(view_ptr).ok_or(HandleError::Unavailable)?;
         let wh = AppKitWindowHandle::new(view_ptr);
         let raw = RawWindowHandle::AppKit(wh);
         Ok(unsafe { WindowHandle::borrow_raw(raw) })
@@ -658,6 +509,232 @@ impl EguiView {
         } else {
             ll("✅ EguiView state initialized and set successfully.");
             // Request a redraw now that we are initialized.
+            unsafe { self.setNeedsDisplay(true) };
+        }
+    }
+
+    // Helper methods for draw_rect refactoring
+    fn acquire_surface_frame(&self, state: &EguiViewState) -> Option<wgpu::SurfaceTexture> {
+        match state.surface.get_current_texture() {
+            Ok(frame) => Some(frame),
+            Err(wgpu::SurfaceError::Lost) => {
+                ll("⚠️ wgpu surface lost, reconfiguring...");
+                state
+                    .surface
+                    .configure(&state.device, &state.surface_config);
+                None
+            }
+            Err(e) => {
+                ll(&format!(
+                    "❌ Failed to acquire next swap chain texture: {}",
+                    e
+                ));
+                None
+            }
+        }
+    }
+
+    fn prepare_egui_input(&self, state: &EguiViewState) -> RawInput {
+        let mut events = state.events.borrow_mut();
+        let now = Instant::now();
+        let last_frame_time = *state.last_frame_time.borrow();
+        let frame_time = now.duration_since(last_frame_time);
+        *state.last_frame_time.borrow_mut() = now;
+
+        let surface_size = Vec2::new(
+            state.surface_config.width as f32,
+            state.surface_config.height as f32,
+        );
+
+        let mut viewports = HashMap::default();
+        viewports.insert(
+            egui::ViewportId::ROOT,
+            ViewportInfo {
+                native_pixels_per_point: Some(1.0),
+                monitor_size: Some(Vec2::new(1920.0, 1080.0)),
+                inner_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, surface_size)),
+                outer_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, surface_size)),
+                ..Default::default()
+            },
+        );
+
+        RawInput {
+            viewport_id: egui::ViewportId::ROOT,
+            viewports,
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, surface_size)),
+            max_texture_side: Some(2048),
+            time: Some(
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64(),
+            ),
+            predicted_dt: frame_time.as_secs_f32(),
+            modifiers: *state.modifiers.borrow(),
+            events: events.drain(..).collect(),
+            hovered_files: Vec::new(),
+            dropped_files: Vec::new(),
+            focused: true,
+            system_theme: None,
+        }
+    }
+
+    fn handle_app_state_changes(
+        &self,
+        state: &EguiViewState,
+        full_output: &egui::FullOutput,
+    ) -> bool {
+        // Hide window if ESC was pressed
+        if state.app.borrow().esc_pressed {
+            self.hide_window_and_restore_focus(state);
+            return true;
+        }
+
+        // Handle viewport commands (like window close)
+        for (viewport_id, viewport_output) in &full_output.viewport_output {
+            if *viewport_id == egui::ViewportId::ROOT {
+                for command in &viewport_output.commands {
+                    match command {
+                        egui::ViewportCommand::Close => {
+                            ll("🚪 Egui requested window close - hiding window...");
+                            self.hide_window_and_restore_focus(state);
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn hide_window_and_restore_focus(&self, state: &EguiViewState) {
+        if let Some(window) = self.window() {
+            window.orderOut(None);
+            crate::hotkey::restore_focus(&*window);
+            // Notify app that popup is now hidden
+            state.app.borrow_mut().set_popup_visible(false);
+        }
+
+        // Restore focus to previous app if PID is available (from TrrpyApp)
+        let prev_app_pid = state.app.borrow().prev_pid;
+        if let Some(pid) = prev_app_pid {
+            self.restore_previous_app_by_pid(pid);
+        } else {
+            ll(&format!("No previous app PID: {:?}", prev_app_pid))
+        }
+        state.app.borrow_mut().esc_pressed = false; // Reset flag
+    }
+
+    fn restore_previous_app_by_pid(&self, pid: u32) {
+        let running_app_class =
+            AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
+        let prev_app: *mut AnyObject = unsafe {
+            objc2::msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
+        };
+        if !prev_app.is_null() {
+            let _: bool = unsafe { objc2::msg_send![prev_app, activateWithOptions: 1u64 << 1] }; // NSApplicationActivateIgnoringOtherApps
+        } else {
+            ll(&format!("prev_app is null"))
+        }
+    }
+
+    fn render_frame(
+        &self,
+        state: &EguiViewState,
+        full_output: &egui::FullOutput,
+        output_view: &wgpu::TextureView,
+    ) {
+        let clipped_primitives = state
+            .ctx
+            .tessellate(full_output.shapes.clone(), full_output.pixels_per_point);
+
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [state.surface_config.width, state.surface_config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+
+        let mut encoder = state
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("egui_command_encoder"),
+            });
+
+        // Update textures
+        self.update_textures(state, &full_output.textures_delta);
+
+        // Render to surface
+        self.render_to_surface(
+            state,
+            &mut encoder,
+            &clipped_primitives,
+            &screen_descriptor,
+            output_view,
+        );
+
+        // Submit the command buffer
+        state.queue.submit(Some(encoder.finish()));
+    }
+
+    fn update_textures(&self, state: &EguiViewState, textures_delta: &egui::TexturesDelta) {
+        // Upload all resources to the GPU
+        for (id, image_delta) in &textures_delta.set {
+            state.renderer.borrow_mut().update_texture(
+                &state.device,
+                &state.queue,
+                *id,
+                image_delta,
+            );
+        }
+        for id in &textures_delta.free {
+            state.renderer.borrow_mut().free_texture(id);
+        }
+    }
+
+    fn render_to_surface(
+        &self,
+        state: &EguiViewState,
+        encoder: &mut wgpu::CommandEncoder,
+        clipped_primitives: &[egui::ClippedPrimitive],
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        output_view: &wgpu::TextureView,
+    ) {
+        let mut renderer = state.renderer.borrow_mut();
+        renderer.update_buffers(
+            &state.device,
+            &state.queue,
+            encoder,
+            clipped_primitives,
+            screen_descriptor,
+        );
+
+        // Record all render passes
+        let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("egui_render_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        let mut render_pass = render_pass.forget_lifetime();
+        renderer.render(&mut render_pass, clipped_primitives, screen_descriptor);
+    }
+
+    fn schedule_repaint_if_needed(&self, full_output: &egui::FullOutput) {
+        let repaint_delay = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(std::time::Duration::from_secs(10), |vo| vo.repaint_delay);
+
+        if repaint_delay.is_zero() {
             unsafe { self.setNeedsDisplay(true) };
         }
     }

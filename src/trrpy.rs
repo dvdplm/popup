@@ -18,7 +18,8 @@ pub struct TrrpyApp {
     connection_status: ConnectionStatus,
     lightning_strikes: Vec<String>,
     max_strikes: usize,
-    is_popup_visible: bool,
+    visible: bool,
+    auto_connect: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -43,19 +44,20 @@ impl Default for TrrpyApp {
             connection_status: ConnectionStatus::Disconnected,
             lightning_strikes: Vec::new(),
             max_strikes: 100, // Keep only the last 100 strikes
-            is_popup_visible: false,
+            visible: false,
+            auto_connect: true,
         }
     }
 }
 
 impl TrrpyApp {
     pub fn set_popup_visible(&mut self, visible: bool) {
-        if self.is_popup_visible != visible {
-            self.is_popup_visible = visible;
+        if self.visible != visible {
+            self.visible = visible;
 
-            if visible {
+            if visible && self.auto_connect {
                 self.connect_blitzortung();
-            } else {
+            } else if !visible {
                 self.disconnect_blitzortung();
             }
         }
@@ -66,6 +68,10 @@ impl TrrpyApp {
 
         // Handle incoming WebSocket messages
         self.handle_websocket_messages();
+
+        // Always request repaint to ensure continuous message processing
+        // This solves the issue where lightning data only updates on mouse movement
+        ctx.request_repaint();
 
         // Capture mouse position
         if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
@@ -99,11 +105,20 @@ impl TrrpyApp {
             ui.horizontal(|ui| {
                 if ui.button("Connect Blitzortung").clicked() {
                     self.connect_blitzortung();
+                    self.auto_connect = true;
                 }
                 if ui.button("Disconnect").clicked() {
                     self.disconnect_blitzortung();
+                    self.auto_connect = false;
                 }
             });
+
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.auto_connect, "Auto-connect when popup opens");
+            });
+
             ui.separator();
 
             // Connection status indicator
@@ -235,8 +250,14 @@ impl TrrpyApp {
         let messages: Vec<_> = if let Some(ref manager) = self.websocket_manager {
             if let Ok(mgr) = manager.lock() {
                 let mut msgs = Vec::new();
+                let mut msg_count = 0;
                 while let Some(message) = mgr.try_recv_message() {
                     msgs.push(message);
+                    msg_count += 1;
+                    // Process up to 50 messages per frame to avoid blocking the UI
+                    if msg_count >= 50 {
+                        break;
+                    }
                 }
                 msgs
             } else {
