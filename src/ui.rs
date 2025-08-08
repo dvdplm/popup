@@ -11,9 +11,10 @@ use egui_wgpu::wgpu::{
     },
 };
 use objc2::rc::Retained;
+use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::NSView;
-use objc2_foundation::{NSNumber, NSPoint, NSRect};
+use objc2_foundation::{NSPoint, NSRect};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -142,6 +143,7 @@ pub(crate) struct Ivars {
     // after the view has been created and added to a window.
     pub(crate) state: Box<OnceLock<EguiViewState>>,
 }
+
 define_class!(
     /// A custom `NSView` that is responsible for hosting and rendering an `egui` UI.
     // SAFETY:
@@ -162,188 +164,32 @@ define_class!(
                 return;
             };
 
-            let output_frame = match state.surface.get_current_texture() {
-                Ok(frame) => frame,
-                Err(wgpu::SurfaceError::Lost) => {
-                    // Reconfigure the surface if it's lost.
-                    ll("⚠️ wgpu surface lost, reconfiguring...");
-                    state.surface.configure(&state.device, &state.surface_config);
-                    return;
-                }
-                Err(e) => {
-                    ll(&format!("❌ Failed to acquire next swap chain texture: {}", e));
-                    return;
-                }
+            let Some(output_frame) = self.acquire_surface_frame(state) else {
+                return;
             };
 
             let output_view = output_frame
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Collect accumulated events and prepare input for egui
-            let mut events = state.events.borrow_mut();
-            let now = Instant::now();
-            let last_frame_time = *state.last_frame_time.borrow();
-            let frame_time = now.duration_since(last_frame_time);
-            *state.last_frame_time.borrow_mut() = now;
-
-            let mut viewports = HashMap::default();
-            viewports.insert(egui::ViewportId::ROOT, ViewportInfo {
-                native_pixels_per_point: Some(1.0),
-                monitor_size: Some(Vec2::new(1920.0, 1080.0)),
-                inner_rect: Some(egui::Rect::from_min_size(
-                    Pos2::ZERO,
-                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
-                )),
-                outer_rect: Some(egui::Rect::from_min_size(
-                    Pos2::ZERO,
-                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
-                )),
-                ..Default::default()
-            });
-
-            let raw_input = RawInput {
-                viewport_id: egui::ViewportId::ROOT,
-                viewports,
-                screen_rect: Some(egui::Rect::from_min_size(
-                    Pos2::ZERO,
-                    Vec2::new(state.surface_config.width as f32, state.surface_config.height as f32)
-                )),
-                max_texture_side: Some(2048),
-                time: Some(SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()),
-                predicted_dt: frame_time.as_secs_f32(),
-                modifiers: *state.modifiers.borrow(),
-                events: events.drain(..).collect(),
-                hovered_files: Vec::new(),
-                dropped_files: Vec::new(),
-                focused: true,
-                system_theme: None,
-            };
+            let raw_input = self.prepare_egui_input(state);
 
             // Run egui and update app state
-                let full_output = state.ctx.run(raw_input, |ctx| {
-                    state.app.borrow_mut().update(ctx);
-                });
+            let full_output = state.ctx.run(raw_input, |ctx| {
+                state.app.borrow_mut().update(ctx);
+            });
 
-                // Hide window if ESC was pressed
-                if state.app.borrow().esc_pressed {
-                    if let Some(window) = self.window() {
-                        window.orderOut(None);
-                        crate::restore_previous_app_focus(&*window);
-                    }
-                    // Restore focus to previous app if PID is available (from TrrpyApp)
-                    let prev_app_pid = state.app.borrow().prev_app_pid; // TODO: should probably `take()` here so we clear the pid.
-                    if let Some(pid) = prev_app_pid {
-                        let running_app_class = objc2::runtime::AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
-                        let prev_app: *mut objc2::runtime::AnyObject = unsafe {
-                            objc2::msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
-                        };
-                        if !prev_app.is_null() {
-                            let _: bool = unsafe { objc2::msg_send![prev_app, activateWithOptions: 1u64 << 1] }; // NSApplicationActivateIgnoringOtherApps
-                        } else {
-                            ll(&format!("prev_app is null"))
-                        }
-                    } else {
-                        ll(&format!("No previous app PID: {:?}", prev_app_pid))
-                    }
-                    state.app.borrow_mut().esc_pressed = false; // Reset flag
-                    return;
-                }
-
-            // Handle viewport commands (like window close)
-            for (viewport_id, viewport_output) in &full_output.viewport_output {
-                if *viewport_id == egui::ViewportId::ROOT {
-                    for command in &viewport_output.commands {
-                        match command {
-                            egui::ViewportCommand::Close => {
-                                ll("🚪 Egui requested window close - hiding window...");
-                                // Hide the window instead of terminating
-                                if let Some(window) = self.window() {
-                                    window.orderOut(None);
-                                    crate::restore_previous_app_focus(&*window);
-                                }
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+            // Handle app state changes (ESC key, close commands)
+            if self.handle_app_state_changes(state, &full_output) {
+                return;
             }
 
-            let clipped_primitives = state
-                .ctx
-                .tessellate(full_output.shapes, full_output.pixels_per_point);
+            // Render the frame
+            self.render_frame(state, &full_output, &output_view);
 
-            let screen_descriptor = egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [state.surface_config.width, state.surface_config.height],
-                pixels_per_point: full_output.pixels_per_point,
-            };
-
-            let mut encoder =
-                state
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("egui_command_encoder"),
-                    });
-
-            // Upload all resources to the GPU.
-            for (id, image_delta) in &full_output.textures_delta.set {
-                state
-                    .renderer.borrow_mut()
-                    .update_texture(&state.device, &state.queue, *id, image_delta);
-            }
-            for id in &full_output.textures_delta.free {
-                state.renderer.borrow_mut().free_texture(id);
-            }
-
-            // Upload all resources to the GPU.
-            for (id, image_delta) in &full_output.textures_delta.set {
-                state
-                    .renderer
-                    .borrow_mut()
-                    .update_texture(&state.device, &state.queue, *id, image_delta);
-            }
-            for id in &full_output.textures_delta.free {
-                state.renderer.borrow_mut().free_texture(id);
-            }
-
-            let mut renderer = state.renderer.borrow_mut();
-            renderer.update_buffers(
-                &state.device,
-                &state.queue,
-                &mut encoder,
-                &clipped_primitives,
-                &screen_descriptor,
-            );
-            // Record all render passes.
-            {
-                let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("egui_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &output_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                let mut render_pass = render_pass.forget_lifetime();
-                renderer.render(&mut render_pass, &clipped_primitives, &screen_descriptor);
-            }
-
-
-            // Submit the command buffer.
-            state.queue.submit(Some(encoder.finish()));
+            // Present the frame and schedule next repaint if needed
             output_frame.present();
-
-            let repaint_delay = full_output.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::from_secs(10), |vo| vo.repaint_delay);
-            if repaint_delay.is_zero() {
-                unsafe {self.setNeedsDisplay(true)};
-            }
+            self.schedule_repaint_if_needed(&full_output);
         }
 
         /// Informs AppKit that this view can become the "first responder,"
@@ -663,6 +509,232 @@ impl EguiView {
         } else {
             ll("✅ EguiView state initialized and set successfully.");
             // Request a redraw now that we are initialized.
+            unsafe { self.setNeedsDisplay(true) };
+        }
+    }
+
+    // Helper methods for draw_rect refactoring
+    fn acquire_surface_frame(&self, state: &EguiViewState) -> Option<wgpu::SurfaceTexture> {
+        match state.surface.get_current_texture() {
+            Ok(frame) => Some(frame),
+            Err(wgpu::SurfaceError::Lost) => {
+                ll("⚠️ wgpu surface lost, reconfiguring...");
+                state
+                    .surface
+                    .configure(&state.device, &state.surface_config);
+                None
+            }
+            Err(e) => {
+                ll(&format!(
+                    "❌ Failed to acquire next swap chain texture: {}",
+                    e
+                ));
+                None
+            }
+        }
+    }
+
+    fn prepare_egui_input(&self, state: &EguiViewState) -> RawInput {
+        let mut events = state.events.borrow_mut();
+        let now = Instant::now();
+        let last_frame_time = *state.last_frame_time.borrow();
+        let frame_time = now.duration_since(last_frame_time);
+        *state.last_frame_time.borrow_mut() = now;
+
+        let surface_size = Vec2::new(
+            state.surface_config.width as f32,
+            state.surface_config.height as f32,
+        );
+
+        let mut viewports = HashMap::default();
+        viewports.insert(
+            egui::ViewportId::ROOT,
+            ViewportInfo {
+                native_pixels_per_point: Some(1.0),
+                monitor_size: Some(Vec2::new(1920.0, 1080.0)),
+                inner_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, surface_size)),
+                outer_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, surface_size)),
+                ..Default::default()
+            },
+        );
+
+        RawInput {
+            viewport_id: egui::ViewportId::ROOT,
+            viewports,
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, surface_size)),
+            max_texture_side: Some(2048),
+            time: Some(
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64(),
+            ),
+            predicted_dt: frame_time.as_secs_f32(),
+            modifiers: *state.modifiers.borrow(),
+            events: events.drain(..).collect(),
+            hovered_files: Vec::new(),
+            dropped_files: Vec::new(),
+            focused: true,
+            system_theme: None,
+        }
+    }
+
+    fn handle_app_state_changes(
+        &self,
+        state: &EguiViewState,
+        full_output: &egui::FullOutput,
+    ) -> bool {
+        // Hide window if ESC was pressed
+        if state.app.borrow().esc_pressed {
+            self.hide_window_and_restore_focus(state);
+            return true;
+        }
+
+        // Handle viewport commands (like window close)
+        for (viewport_id, viewport_output) in &full_output.viewport_output {
+            if *viewport_id == egui::ViewportId::ROOT {
+                for command in &viewport_output.commands {
+                    match command {
+                        egui::ViewportCommand::Close => {
+                            ll("🚪 Egui requested window close - hiding window...");
+                            self.hide_window_and_restore_focus(state);
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn hide_window_and_restore_focus(&self, state: &EguiViewState) {
+        if let Some(window) = self.window() {
+            window.orderOut(None);
+            crate::hotkey::restore_focus(&*window);
+            // Notify app that popup is now hidden
+            state.app.borrow_mut().set_popup_visible(false);
+        }
+
+        // Restore focus to previous app if PID is available (from TrrpyApp)
+        let prev_app_pid = state.app.borrow().prev_pid;
+        if let Some(pid) = prev_app_pid {
+            self.restore_previous_app_by_pid(pid);
+        } else {
+            ll(&format!("No previous app PID: {:?}", prev_app_pid))
+        }
+        state.app.borrow_mut().esc_pressed = false; // Reset flag
+    }
+
+    fn restore_previous_app_by_pid(&self, pid: u32) {
+        let running_app_class =
+            AnyClass::get(CStr::from_bytes_with_nul(b"NSRunningApplication\0").unwrap()).unwrap();
+        let prev_app: *mut AnyObject = unsafe {
+            objc2::msg_send![running_app_class, runningApplicationWithProcessIdentifier: pid as i32]
+        };
+        if !prev_app.is_null() {
+            let _: bool = unsafe { objc2::msg_send![prev_app, activateWithOptions: 1u64 << 1] }; // NSApplicationActivateIgnoringOtherApps
+        } else {
+            ll(&format!("prev_app is null"))
+        }
+    }
+
+    fn render_frame(
+        &self,
+        state: &EguiViewState,
+        full_output: &egui::FullOutput,
+        output_view: &wgpu::TextureView,
+    ) {
+        let clipped_primitives = state
+            .ctx
+            .tessellate(full_output.shapes.clone(), full_output.pixels_per_point);
+
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [state.surface_config.width, state.surface_config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+
+        let mut encoder = state
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("egui_command_encoder"),
+            });
+
+        // Update textures
+        self.update_textures(state, &full_output.textures_delta);
+
+        // Render to surface
+        self.render_to_surface(
+            state,
+            &mut encoder,
+            &clipped_primitives,
+            &screen_descriptor,
+            output_view,
+        );
+
+        // Submit the command buffer
+        state.queue.submit(Some(encoder.finish()));
+    }
+
+    fn update_textures(&self, state: &EguiViewState, textures_delta: &egui::TexturesDelta) {
+        // Upload all resources to the GPU
+        for (id, image_delta) in &textures_delta.set {
+            state.renderer.borrow_mut().update_texture(
+                &state.device,
+                &state.queue,
+                *id,
+                image_delta,
+            );
+        }
+        for id in &textures_delta.free {
+            state.renderer.borrow_mut().free_texture(id);
+        }
+    }
+
+    fn render_to_surface(
+        &self,
+        state: &EguiViewState,
+        encoder: &mut wgpu::CommandEncoder,
+        clipped_primitives: &[egui::ClippedPrimitive],
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        output_view: &wgpu::TextureView,
+    ) {
+        let mut renderer = state.renderer.borrow_mut();
+        renderer.update_buffers(
+            &state.device,
+            &state.queue,
+            encoder,
+            clipped_primitives,
+            screen_descriptor,
+        );
+
+        // Record all render passes
+        let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("egui_render_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        let mut render_pass = render_pass.forget_lifetime();
+        renderer.render(&mut render_pass, clipped_primitives, screen_descriptor);
+    }
+
+    fn schedule_repaint_if_needed(&self, full_output: &egui::FullOutput) {
+        let repaint_delay = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(std::time::Duration::from_secs(10), |vo| vo.repaint_delay);
+
+        if repaint_delay.is_zero() {
             unsafe { self.setNeedsDisplay(true) };
         }
     }
