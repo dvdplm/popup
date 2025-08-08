@@ -10,11 +10,15 @@ objc2-foundation = { version = "0.3.1", default-features = false, features = [
     "NSNotification",
     "NSString",
     "NSObject",
-    "NSThread",
+    "NSThread"
 ] }
 objc2-app-kit = { version = "0.3.1", default-features = false, features = [
     "std",
     "NSResponder",
     "NSApplication",
-    "NSRunningApplication",
+    "NSRunningApplication","NSGraphics", "NSWindow","NSView","NSWorkspace"
 ] }
+egui = "0.32.0"
+egui-wgpu = "0.32.0"
+wgpu = {version = "25.0.2", features = ["metal"]}
+pollster = "0.4.0"
