@@ -32,3 +32,7 @@ Check out the code on a Mac, run `cargo run`, press Cmd+Shift+k to show, ESC or 
 - Better `tokio` architecture.
 - Persist state when showing/hiding the UI.
 - Persist state across restarts.
+
+
+
+<img width="1027" height="846" alt="Screenshot 2025-08-11 at 13 46 21" src="https://github.com/user-attachments/assets/3d9fb42b-a23b-4dbf-b63c-e7bde10c0796" />
