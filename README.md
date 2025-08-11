@@ -15,6 +15,10 @@ Building on other platforms is not supported.
 - The `egui` content is drawn with the GPU with `wgpu`.
 - As a demo of using async rust with a main-thread-dependent UI, the `egui` app fetches a live feed of lightning strikes across the globe.
 
+### Run it
+
+Check out the code on a Mac, run `cargo run`, press Cmd+Shift+k to show, ESC or hotkey to close. Check to see if lightning is about to strike.
+
 ### Key findings
 
 - There are likely way better ways of doing this, e.g. with the `hotkey` and `winit` crates.
